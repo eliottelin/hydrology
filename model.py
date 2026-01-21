@@ -93,5 +93,6 @@ def water_balance_simulation(p, rain_df):
     results['q'] = q_out
     results['et'] = et_out
     results['l'] = l_out
+    results['i'] = i_out
     
     return results

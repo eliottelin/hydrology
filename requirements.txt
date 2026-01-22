@@ -41,3 +41,8 @@ tornado==6.5.4
 typing_extensions==4.15.0
 tzdata==2025.3
 urllib3==2.6.3
+
+# Optional: interactive maps in Streamlit
+streamlit-folium==0.21.0
+# pin a folium release available on PyPI for this Python version
+folium==0.19.7

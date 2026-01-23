@@ -104,7 +104,22 @@ def call_tamu_api(api_key: str, prompt: str, model: str = DEFAULT_TAMU_MODEL, ba
         return "__error__:NoAPIKey:No TAMU API key provided"
 
     url = f"{base_url.rstrip('/')}/api/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    # HTTP header values must be Latin-1 (per http.client). Some copy/pasted API keys
+    # or base URLs can include non-Latin characters (e.g. an em-dash) which cause
+    # a UnicodeEncodeError when requests tries to send headers. Sanitize header
+    # values by dropping characters that can't be encoded as latin-1 so the
+    # request fails more clearly on auth rather than raising during header encoding.
+    def _sanitize_header_value(v):
+        if v is None:
+            return ''
+        try:
+            # Coerce to str, then encode->decode latin-1 ignoring unencodable chars
+            return str(v).encode('latin-1', errors='ignore').decode('latin-1')
+        except Exception:
+            return str(v)
+
+    safe_key = _sanitize_header_value(api_key)
+    headers = {"Authorization": f"Bearer {safe_key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
         "stream": False,
@@ -387,11 +402,17 @@ with st.sidebar.expander("Fetch weather by coordinates", expanded=False):
 # --- TAMU AI settings (per-user token supported) ---
 st.sidebar.header("TAMU AI")
 tamu_api_key = st.sidebar.text_input("TAMU AI API Key (optional)", type="password")
+# Mirror the entered API key into session_state immediately so summary generation
+# and the Test/TAMU buttons work without needing to open the TAMU options expander.
+st.session_state['tamu_api_key'] = tamu_api_key
 
 # Provide defaults so other code can reference these even when key not provided
 # Ensure these are concrete types (avoid passing None to helper functions)
 tamu_base_url = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
 tamu_mock = bool(st.session_state.get('tamu_mock', False))
+# Ensure base URL and mock flags exist in session_state for helpers to read.
+st.session_state.setdefault('tamu_base_url', tamu_base_url)
+st.session_state.setdefault('tamu_mock', tamu_mock)
 
 # NOTE: summaries are now always generated automatically (background) after running a simulation.
 
@@ -630,189 +651,71 @@ elif data_source == "Generated Example Data":
 # --- SIMULATION ---
 if st.button("Run Simulation", type="primary"):
     if rain_df is not None:
-        # Ensure 'Date' is datetime
         try:
+            # Ensure 'Date' is datetime
             if 'Date' in rain_df.columns:
                 rain_df['Date'] = pd.to_datetime(rain_df['Date'])
             
-            # --- RUN MODEL ---
+            # 1. RUN MODEL
             results = water_balance_simulation(p, rain_df)
             
-            # --- PLOTTING ---
-            st.header("Step 2: Results")
-
-            # Summaries / Metrics (with units)
-            total_rain = results['Rain'].sum()
-            mean_rain = results['Rain'].mean()
-            total_interception = results['i'].sum()
-            total_runoff = results['q'].sum()
-            mean_soil = results['s'].mean()
-            total_et = results['et'].sum()
-            total_leakage = results['l'].sum()
-
-            cols = st.columns(6)
-            cols[0].metric("Total Rain", f"{total_rain:.1f} mm")
-            cols[1].metric("Mean Rain/day", f"{mean_rain:.2f} mm/d")
-            cols[2].metric("Total Interception", f"{total_interception:.1f} mm")
-            cols[3].metric("Total Runoff", f"{total_runoff:.1f} mm")
-            cols[4].metric("Total ET", f"{total_et:.1f} mm")
-            cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
-
-            # persist results so AI summary can reference them across reruns
-            try:
-                st.session_state['last_results'] = results
-                st.session_state['last_results_ts'] = datetime.now().isoformat()
-                # mark that we've rendered this results set on this run so persisted rendering doesn't duplicate
-                st.session_state['last_results_rendered_ts'] = st.session_state['last_results_ts']
-            except Exception:
-                # if session_state can't store the DataFrame for any reason, ignore
-                pass
-
-            # 1) Precipitation (inputs) — Rain & Canopy Interception
-            fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
-            fig_rain_ci.add_trace(go.Scatter(x=results['Date'], y=results['i'], mode='lines', name='Interception (CI) (mm)', line=dict(color='orange')))
-            fig_rain_ci.update_yaxes(title_text='Precipitation (mm)')
-            st.plotly_chart(fig_rain_ci, width='stretch')
-
-            # 2) Soil moisture (fraction)
-            fig_s = px.line(results, x='Date', y='s', title="Soil Moisture (s) — fraction (0-1)")
-            fig_s.add_hline(y=p['sw'], line_dash="dash", line_color="red", annotation_text="Wilting Point")
-            fig_s.add_hline(y=p['sfc'], line_dash="dash", line_color="green", annotation_text="Field Capacity")
-            fig_s.update_yaxes(title_text='Soil moisture (fraction)')
-            st.plotly_chart(fig_s, width='stretch')
-
-            # 3) ET, Leakage, and Runoff combined (all mm)
-            fig_elq = go.Figure()
-            fig_elq.add_trace(go.Bar(x=results['Date'], y=results['q'], name='Runoff (q) (mm)', marker_color='lightskyblue', opacity=0.6))
-            fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['et'], name='ET (mm)', line=dict(color='green')))
-            fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['l'], name='Leakage (L) (mm)', line=dict(color='brown')))
-            fig_elq.update_layout(title='ET, Leakage, and Runoff (mm)', yaxis_title='mm')
-            st.plotly_chart(fig_elq, width='stretch')
+            # 2. SAVE RESULTS TO SESSION STATE
+            st.session_state['last_results'] = results
+            st.session_state['last_results_ts'] = datetime.now().isoformat()
             
-            # 5. Data Table
-            with st.expander("View Raw Data"):
-                st.dataframe(results)
+            # (Optional) Clear old summaries if new simulation runs
+            if 'ai_summary' in st.session_state:
+                del st.session_state['ai_summary']
                 
-            # 6. Download
-            csv = results.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Results", csv, "simulation_results.csv", "text/csv")
-
-            # Summary placeholder (renders right after metrics). We render existing summary
-            # if available, otherwise provide a Generate button that uses current session settings.
-            summary_placeholder = st.empty()
-            try:
-                def _render_summary_in_placeholder(resp_text):
-                    parsed = parse_ai_json(resp_text or "")
-                    with summary_placeholder.container():
-                        st.markdown("### AI Summary")
-                        plain = resp_text.split('JSON_START')[0].strip() if resp_text and 'JSON_START' in resp_text else (resp_text or "")
-                        if plain:
-                            st.info(plain)
-                        if parsed:
-                            st.subheader("AI structured summary")
-                            st.json(parsed)
-                        else:
-                            st.write("No structured JSON available in AI response.")
-
-                # If an AI summary has already been generated for these results, show it
-                if st.session_state.get('ai_summary') and st.session_state.get('last_results_ai_ts') == st.session_state.get('last_results_ts'):
-                    _render_summary_in_placeholder(st.session_state.get('ai_summary'))
-                else:
-                    # show a generate button in the placeholder
-                    with summary_placeholder.container():
-                        st.markdown("### AI Summary")
-                        st.write("No AI summary generated for these results yet.")
-                        if st.button("Generate AI Summary (include model results)", key="generate_ai_after_run"):
-                            # Prefer persisted results so this button works across reruns
-                            rs = st.session_state.get('last_results') or results
-                            if rs is None:
-                                st.error("No results available to summarize. Run a simulation first.")
-                            else:
-                                resp = generate_and_store_summary(rs)
-                                if resp:
-                                    _render_summary_in_placeholder(resp)
-                                else:
-                                    st.error("AI summary generation failed. See raw response (if any) in session state.")
-
-                # If no AI summary exists for these results yet, generate one synchronously (legacy behavior).
-                try:
-                    need_gen = bool(st.session_state.get('last_results_ts') and st.session_state.get('last_results_ai_ts') != st.session_state.get('last_results_ts'))
-                    if need_gen:
-                        rs = st.session_state.get('last_results') or results
-                        if rs is not None:
-                            resp = generate_and_store_summary(rs)
-                            if resp:
-                                _render_summary_in_placeholder(resp)
-                            else:
-                                # If generation failed but we have some stored ai_summary for this ts, show it
-                                if st.session_state.get('ai_summary') and st.session_state.get('last_results_ai_ts') == st.session_state.get('last_results_ts'):
-                                    _render_summary_in_placeholder(st.session_state.get('ai_summary'))
-                                else:
-                                    st.warning("AI summary generation did not return a result. Check TAMU API settings.")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            
         except Exception as e:
             st.error(f"An error occurred: {e}")
             st.write("Check your CSV columns. They must be 'Date' and 'Rain'.")
 
-# If there are persisted results from a previous run, render them so summaries persist across reruns
-# Avoid duplicating the immediate results we just rendered in the Run Simulation flow by
-# checking a rendered timestamp. If the rendered timestamp matches the results timestamp,
-# we've already shown them above and can skip the persisted block.
-if 'last_results' in st.session_state and st.session_state.get('last_results_rendered_ts') != st.session_state.get('last_results_ts'):
-    try:
-        results = st.session_state['last_results']
-        st.header("Step 2: Results")
+# --- RESULTS DISPLAY (Always runs if results exist) ---
+if 'last_results' in st.session_state:
+    results = st.session_state['last_results']
+    st.header("Step 2: Results")
 
-        total_rain = results['Rain'].sum()
-        mean_rain = results['Rain'].mean()
-        total_interception = results['i'].sum()
-        total_runoff = results['q'].sum()
-        mean_soil = results['s'].mean()
-        total_et = results['et'].sum()
-        total_leakage = results['l'].sum()
+    total_rain = results['Rain'].sum()
+    mean_rain = results['Rain'].mean()
+    total_interception = results['i'].sum()
+    total_runoff = results['q'].sum()
+    mean_soil = results['s'].mean()
+    total_et = results['et'].sum()
+    total_leakage = results['l'].sum()
 
-        cols = st.columns(6)
-        cols[0].metric("Total Rain", f"{total_rain:.1f} mm")
-        cols[1].metric("Mean Rain/day", f"{mean_rain:.2f} mm/d")
-        cols[2].metric("Total Interception", f"{total_interception:.1f} mm")
-        cols[3].metric("Total Runoff", f"{total_runoff:.1f} mm")
-        cols[4].metric("Total ET", f"{total_et:.1f} mm")
-        cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
+    cols = st.columns(6)
+    cols[0].metric("Total Rain", f"{total_rain:.1f} mm")
+    cols[1].metric("Mean Rain/day", f"{mean_rain:.2f} mm/d")
+    cols[2].metric("Total Interception", f"{total_interception:.1f} mm")
+    cols[3].metric("Total Runoff", f"{total_runoff:.1f} mm")
+    cols[4].metric("Total ET", f"{total_et:.1f} mm")
+    cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
 
-        fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
-        fig_rain_ci.add_trace(go.Scatter(x=results['Date'], y=results['i'], mode='lines', name='Interception (CI) (mm)', line=dict(color='orange')))
-        fig_rain_ci.update_yaxes(title_text='Precipitation (mm)')
-        st.plotly_chart(fig_rain_ci, width='stretch')
+    fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
+    fig_rain_ci.add_trace(go.Scatter(x=results['Date'], y=results['i'], mode='lines', name='Interception (CI) (mm)', line=dict(color='orange')))
+    fig_rain_ci.update_yaxes(title_text='Precipitation (mm)')
+    st.plotly_chart(fig_rain_ci, width='stretch')
 
-        fig_s = px.line(results, x='Date', y='s', title="Soil Moisture (s) — fraction (0-1)")
-        fig_s.add_hline(y=p['sw'], line_dash="dash", line_color="red", annotation_text="Wilting Point")
-        fig_s.add_hline(y=p['sfc'], line_dash="dash", line_color="green", annotation_text="Field Capacity")
-        fig_s.update_yaxes(title_text='Soil moisture (fraction)')
-        st.plotly_chart(fig_s, width='stretch')
+    fig_s = px.line(results, x='Date', y='s', title="Soil Moisture (s) — fraction (0-1)")
+    fig_s.add_hline(y=p['sw'], line_dash="dash", line_color="red", annotation_text="Wilting Point")
+    fig_s.add_hline(y=p['sfc'], line_dash="dash", line_color="green", annotation_text="Field Capacity")
+    fig_s.update_yaxes(title_text='Soil moisture (fraction)')
+    st.plotly_chart(fig_s, width='stretch')
 
-        fig_elq = go.Figure()
-        fig_elq.add_trace(go.Bar(x=results['Date'], y=results['q'], name='Runoff (q) (mm)', marker_color='lightskyblue', opacity=0.6))
-        fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['et'], name='ET (mm)', line=dict(color='green')))
-        fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['l'], name='Leakage (L) (mm)', line=dict(color='brown')))
-        fig_elq.update_layout(title='ET, Leakage, and Runoff (mm)', yaxis_title='mm')
-        st.plotly_chart(fig_elq, width='stretch')
+    fig_elq = go.Figure()
+    fig_elq.add_trace(go.Bar(x=results['Date'], y=results['q'], name='Runoff (q) (mm)', marker_color='lightskyblue', opacity=0.6))
+    fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['et'], name='ET (mm)', line=dict(color='green')))
+    fig_elq.add_trace(go.Scatter(x=results['Date'], y=results['l'], name='Leakage (L) (mm)', line=dict(color='brown')))
+    fig_elq.update_layout(title='ET, Leakage, and Runoff (mm)', yaxis_title='mm')
+    st.plotly_chart(fig_elq, width='stretch')
 
-        with st.expander("View Raw Data"):
-            st.dataframe(results)
+    with st.expander("View Raw Data"):
+        st.dataframe(results)
 
-        csv = results.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Results", csv, "simulation_results.csv", "text/csv")
+    csv = results.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Results", csv, "simulation_results.csv", "text/csv")
 
-        # Render the unified AI summary block for persisted results
-        try:
-            show_ai_summary_block(results, button_key="generate_ai_summary_persisted")
-        except Exception:
-            # don't fail page rendering if summary block has issues
-            pass
-    except Exception:
-        # if anything goes wrong rendering persisted results, skip gracefully
-        pass
+    # Render the AI summary block
+    # Note: We use the function defined earlier in your code
+    show_ai_summary_block(results, button_key="generate_ai_summary_persistent")

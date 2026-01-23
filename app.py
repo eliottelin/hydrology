@@ -9,6 +9,13 @@ import socket
 from model import water_balance_simulation
 from datetime import date, datetime, timedelta
 
+# Default TAMU model id used across the app
+DEFAULT_TAMU_MODEL = "protected.claude-haiku-5.4"
+
+# Initialize default model in session_state if not already set so the UI shows the intended default
+if 'tamu_model' not in st.session_state:
+    st.session_state['tamu_model'] = DEFAULT_TAMU_MODEL
+
 # --- AI helpers ---
 def parse_ai_json(text: str):
     """Extract JSON object from text robustly.
@@ -51,10 +58,41 @@ def parse_ai_json(text: str):
     return None
 
 
+# Parameter bounds used to validate/clamp suggested values
+PARAM_BOUNDS = {
+    'sh': (0.0, 1.0),
+    'sw': (0.0, 1.0),
+    'sstar': (0.0, 1.0),
+    'sfc': (0.0, 1.0),
+    'n': (0.1, 1.0),
+    'zr': (10.0, 2000.0),
+    'ks': (0.0, 1000.0),
+    'ew': (0.0, 10.0),
+    'emax': (0.0, 20.0),
+    'beta': (0.0, 20.0),
+    's0': (0.0, 1.0),
+}
+
+
+def clamp_param_value(key, value):
+    """Clamp a numeric parameter value into allowed bounds where defined."""
+    try:
+        v = float(value)
+    except Exception:
+        return value
+    if key in PARAM_BOUNDS:
+        lo, hi = PARAM_BOUNDS[key]
+        if v < lo:
+            return lo
+        if v > hi:
+            return hi
+    return v
 
 
 
-def call_tamu_api(api_key: str, prompt: str, model: str = "protected.gemini-2.5-flash-lite", base_url: str = "https://chat-api.tamu.ai", mock: bool = False, timeout: int = 30):
+
+
+def call_tamu_api(api_key: str, prompt: str, model: str = DEFAULT_TAMU_MODEL, base_url: str = "https://chat-api.tamu.ai", mock: bool = False, timeout: int = 30):
     """Call the TAMU AI chat completions endpoint and return assistant text or an error string prefixed with __error__.
     Uses POST {base_url.rstrip('/')}/api/chat/completions with payload matching docs.
     If mock=True returns a canned response for local dev.
@@ -102,13 +140,47 @@ def call_tamu_api(api_key: str, prompt: str, model: str = "protected.gemini-2.5-
             return "__error__:unknown"
 
 
+def generate_and_store_summary(results_df):
+    """Generate AI summary for a given results DataFrame and store into session_state.
+    Uses session_state values for token/model/base_url/mock. Returns the raw response or None.
+    """
+    if results_df is None:
+        return None
+    token = st.session_state.get('tamu_api_key')
+    mock_mode = bool(st.session_state.get('tamu_mock', False))
+    model_to_use = str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL)
+    base_to_use = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+    try:
+        tr = float(results_df['Rain'].sum())
+        te = float(results_df['et'].sum())
+        tq = float(results_df['q'].sum())
+        ms = float(results_df['s'].mean())
+    except Exception:
+        tr = te = tq = ms = 0.0
+    prompt = f"""
+Provide a short, user-facing summary (3-5 sentences) of the simulation results for location {st.session_state.get('location_name','(unknown)')} (Lat:{st.session_state.get('loc_lat','?')}, Lon:{st.session_state.get('loc_lon','?')}).
+Include the following numeric results: total_rain={tr:.2f} mm, total_et={te:.2f} mm, total_runoff={tq:.2f} mm, mean_soil={ms:.3f}.
+Return two things: (1) a short plain-text summary, and (2) a JSON object exactly between markers JSON_START and JSON_END containing keys: 'total_rain','total_et','total_runoff','mean_soil','recommendation'.
+Do not include extra commentary outside the requested text and JSON.
+"""
+    resp = call_tamu_api(token or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
+    if resp and not (isinstance(resp, str) and resp.startswith("__error__")):
+        st.session_state['ai_summary'] = resp
+        parsed = parse_ai_json(resp or "")
+        if parsed:
+            st.session_state['ai_summary_json'] = parsed
+        st.session_state['last_results_ai_ts'] = st.session_state.get('last_results_ts')
+        return resp
+    return None
+
+
 @st.cache_data(ttl=3600)
 def fetch_tamu_models(api_key: str, base_url: str = "https://chat-api.tamu.ai", mock: bool = False):
     """Return a list of model ids from the TAMU /openai/models endpoint. Returns empty list on failure.
     Cached for 1 hour.
     """
     if mock:
-        return ["protected.gemini-2.5-flash-lite"]
+        return [DEFAULT_TAMU_MODEL]
     if not api_key:
         return []
     try:
@@ -150,7 +222,11 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary"):
     with st.expander("AI: Generate summary and structured JSON", expanded=False):
         st.write("Generate a concise summary and a small JSON payload with metrics. Requires TAMU API key (or mock enabled).")
         if st.button("Generate AI Summary (include model results)", key=button_key):
-            token_to_use = st.session_state.get('tamu_api_key', tamu_api_key)
+            # Resolve runtime values from session_state (avoid relying on outer names)
+            token_to_use = st.session_state.get('tamu_api_key')
+            model_to_use = str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL)
+            base_to_use = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+            mock_mode = bool(st.session_state.get('tamu_mock', False))
             with st.spinner("Contacting TAMU AI for a summary..."):
                 try:
                     total_rain = float(results['Rain'].sum())
@@ -165,7 +241,7 @@ Include the following numeric results: total_rain={total_rain:.2f} mm, total_et=
 Return two things: (1) a short plain-text summary, and (2) a JSON object exactly between markers JSON_START and JSON_END containing keys: 'total_rain','total_et','total_runoff','mean_soil','recommendation'.
 Do not include extra commentary outside the requested text and JSON.
 """
-                resp = call_tamu_api(token_to_use or "", prompt, model=effective_tamu_model, base_url=st.session_state.get('tamu_base_url', tamu_base_url), mock=st.session_state.get('tamu_mock', tamu_mock))
+                resp = call_tamu_api(token_to_use or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
                 if not resp:
                     st.error("No response from TAMU AI. Check API key and network connectivity.")
                 elif isinstance(resp, str) and resp.startswith("__error__"):
@@ -234,35 +310,47 @@ def get_geocoding_results(query: str):
 
 
 st.sidebar.header("Location")
-place = st.sidebar.text_input("Place name (e.g. Austin, TX)", value="")
-if st.sidebar.button("Lookup place") and place:
+
+# Place lookup inputs: support pressing Enter by using on_change callback
+def _lookup_place_action():
+    place_name = st.session_state.get('place_input', '').strip()
+    if not place_name:
+        return
     with st.sidebar.spinner("Looking up place..."):
-        geo = get_geocoding_results(place)
+        geo = get_geocoding_results(place_name)
         if not geo:
             st.sidebar.error("No results found")
-        else:
-            st.sidebar.success(f"Found: {geo.get('name')}, {geo.get('country')}")
-            st.session_state['loc_lat'] = geo.get('latitude')
-            st.session_state['loc_lon'] = geo.get('longitude')
-            st.session_state['location_name'] = f"{geo.get('name')}, {geo.get('country')}"
-            # One-click: automatically fetch precipitation for found place (last 365 days)
-            try:
-                sd = datetime.today().date() - timedelta(days=365)
-                ed = datetime.today().date()
-                df_precip = get_precipitation(geo.get('latitude'), geo.get('longitude'), sd, ed)
-                if df_precip is not None and not df_precip.empty:
-                    st.session_state['rain_df'] = df_precip
-                    st.sidebar.success(f"Fetched {len(df_precip)} days for {geo.get('name')}")
-                    # mini preview plot (last 30 days)
-                    try:
-                        mini_fig = px.bar(df_precip.tail(30), x='Date', y='Rain', labels={'Rain': 'mm'}, title='Last 30 days (preview)')
-                        st.sidebar.plotly_chart(mini_fig, width=260)
-                    except Exception:
-                        pass
-                else:
-                    st.sidebar.info("Lookup succeeded but no precipitation data available for that period.")
-            except Exception as e:
-                st.sidebar.error(f"Auto-fetch failed: {e}")
+            return
+        st.sidebar.success(f"Found: {geo.get('name')}, {geo.get('country')}")
+        st.session_state['loc_lat'] = geo.get('latitude')
+        st.session_state['loc_lon'] = geo.get('longitude')
+        st.session_state['location_name'] = f"{geo.get('name')}, {geo.get('country')}"
+        # Auto-fetch precipitation using stored place_start/place_end
+        try:
+            sd = st.session_state.get('place_start') or (datetime.today().date() - timedelta(days=365))
+            ed = st.session_state.get('place_end') or datetime.today().date()
+            df_precip = get_precipitation(geo.get('latitude'), geo.get('longitude'), sd, ed)
+            if df_precip is not None and not df_precip.empty:
+                st.session_state['rain_df'] = df_precip
+                st.sidebar.success(f"Fetched {len(df_precip)} days for {geo.get('name')}")
+                try:
+                    mini_fig = px.bar(df_precip.tail(30), x='Date', y='Rain', labels={'Rain': 'mm'}, title='Last 30 days (preview)')
+                    st.sidebar.plotly_chart(mini_fig, width=260)
+                except Exception:
+                    pass
+            else:
+                st.sidebar.info("Lookup succeeded but no precipitation data available for that period.")
+        except Exception as e:
+            st.sidebar.error(f"Auto-fetch failed: {e}")
+
+# text_input will call _lookup_place_action on Enter (via on_change)
+place = st.sidebar.text_input("Place name (e.g. Austin, TX)", value="", key='place_input', on_change=_lookup_place_action)
+# Allow the user to pick start/end dates for place lookup (defaults to last 365 days)
+place_start = st.sidebar.date_input("Place lookup start date", datetime.today().date() - timedelta(days=365), key='place_start')
+place_end = st.sidebar.date_input("Place lookup end date", datetime.today().date(), key='place_end')
+if st.sidebar.button("Lookup place"):
+    # Trigger same action when pressing the button
+    _lookup_place_action()
 
 # show selected coords (if any)
 if 'loc_lat' in st.session_state and 'loc_lon' in st.session_state:
@@ -299,97 +387,106 @@ with st.sidebar.expander("Fetch weather by coordinates", expanded=False):
 # --- TAMU AI settings (per-user token supported) ---
 st.sidebar.header("TAMU AI")
 tamu_api_key = st.sidebar.text_input("TAMU AI API Key (optional)", type="password")
-tamu_base_url = st.sidebar.text_input("TAMU API base URL", value="https://chat-api.tamu.ai")
-tamu_mock = st.sidebar.checkbox("Mock TAMU AI (dev)", value=False)
 
-# mirror into session_state so helper functions can read latest values
-st.session_state['tamu_api_key'] = tamu_api_key
-st.session_state['tamu_base_url'] = tamu_base_url
-st.session_state['tamu_mock'] = tamu_mock
+# Provide defaults so other code can reference these even when key not provided
+# Ensure these are concrete types (avoid passing None to helper functions)
+tamu_base_url = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+tamu_mock = bool(st.session_state.get('tamu_mock', False))
 
-# Try to fetch available TAMU models and present as a dropdown when possible
-available_models = []
-if tamu_api_key and not tamu_mock:
-    try:
-        with st.sidebar.spinner("Fetching TAMU models..."):
-            available_models = fetch_tamu_models(tamu_api_key, tamu_base_url, tamu_mock)
-    except Exception:
+# NOTE: summaries are now always generated automatically (background) after running a simulation.
+
+# Convenience: quick reset of the TAMU model to the intended default if the user wants it
+if st.sidebar.button("Reset TAMU model to default"):
+    st.session_state['tamu_model'] = DEFAULT_TAMU_MODEL
+
+# Only show detailed TAMU options when an API key is provided (cleaner sidebar)
+if tamu_api_key:
+    with st.sidebar.expander("TAMU options", expanded=False):
+        tamu_base_url = st.text_input("TAMU API base URL", value=st.session_state.get('tamu_base_url', "https://chat-api.tamu.ai"))
+        tamu_mock = st.checkbox("Mock TAMU AI (dev)", value=st.session_state.get('tamu_mock', False))
+        # mirror into session_state so helper functions can read latest values
+        st.session_state['tamu_api_key'] = tamu_api_key
+        st.session_state['tamu_base_url'] = tamu_base_url
+        st.session_state['tamu_mock'] = tamu_mock
+
+        # Try to fetch available TAMU models and present as a dropdown when possible
         available_models = []
-
-if available_models:
-    # use session_state key so selection persists
-    tamu_model = st.sidebar.selectbox("TAMU Model", options=available_models, index=0, key='tamu_model')
-else:
-    tamu_model = st.sidebar.text_input("TAMU Model (enter id)", value=st.session_state.get('tamu_model', "protected.gemini-2.5-flash-lite"), key='tamu_model')
-
-# normalize effective model string for downstream calls
-effective_tamu_model = str(st.session_state.get('tamu_model') or tamu_model or "protected.gemini-2.5-flash-lite")
-
-if st.sidebar.button("Test TAMU API"):
-    if not tamu_base_url:
-        st.sidebar.error("Set the TAMU API base URL first.")
-    else:
-        # DNS preflight
-        try:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(tamu_base_url)
-            host = parsed.hostname or tamu_base_url
+        if tamu_api_key and not tamu_mock:
             try:
-                ip = socket.gethostbyname(host)
-                st.sidebar.success(f"Resolved host {host} -> {ip}")
-            except Exception as dns_e:
-                st.sidebar.warning(f"Could not resolve host {host}: {dns_e}")
-        except Exception:
-            host = None
+                with st.spinner("Fetching TAMU models..."):
+                    available_models = fetch_tamu_models(
+                        tamu_api_key,
+                        base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
+                        mock=bool(tamu_mock),
+                    )
+            except Exception:
+                available_models = []
 
-        try:
-            test_prompt = "Test connection from Hydrology app. Reply with short text 'OK'."
-            test_resp = call_tamu_api(tamu_api_key or "", test_prompt, model=effective_tamu_model, base_url=tamu_base_url, mock=tamu_mock)
-            if not test_resp:
-                st.sidebar.error("No response from TAMU API. Check network and base URL.")
-            elif isinstance(test_resp, str) and test_resp.startswith("__error__"):
-                st.sidebar.error("TAMU API call failed. See raw details below.")
-                with st.sidebar.expander("TAMU raw error"):
-                    st.code(test_resp)
+        if available_models:
+            # use session_state key so selection persists
+            tamu_model = st.selectbox("TAMU Model", options=available_models, index=0, key='tamu_model')
+        else:
+            tamu_model = st.text_input("TAMU Model (enter id)", value=st.session_state.get('tamu_model', DEFAULT_TAMU_MODEL), key='tamu_model')
+
+        # normalize effective model string for downstream calls
+        effective_tamu_model = str(st.session_state.get('tamu_model') or tamu_model or DEFAULT_TAMU_MODEL)
+
+        if st.button("Test TAMU API"):
+            if not tamu_base_url:
+                st.error("Set the TAMU API base URL first.")
             else:
-                st.sidebar.success("TAMU API reachable (response shown below).")
-                with st.sidebar.expander("TAMU test response"):
-                    st.code(test_resp)
-        except Exception as e:
-            st.sidebar.error(f"TAMU test failed: {e}")
+                # DNS preflight
+                try:
+                    from urllib.parse import urlparse
+
+                    parsed = urlparse(tamu_base_url)
+                    host = parsed.hostname or tamu_base_url
+                    try:
+                        ip = socket.gethostbyname(host)
+                        st.success(f"Resolved host {host} -> {ip}")
+                    except Exception as dns_e:
+                        st.warning(f"Could not resolve host {host}: {dns_e}")
+                except Exception:
+                    host = None
+
+                try:
+                    test_prompt = "Test connection from Hydrology app. Reply with short text 'OK'."
+                    test_resp = call_tamu_api(
+                        tamu_api_key or "",
+                        test_prompt,
+                        model=str(st.session_state.get('tamu_model') or effective_tamu_model or DEFAULT_TAMU_MODEL),
+                        base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
+                        mock=bool(tamu_mock),
+                    )
+                    if not test_resp:
+                        st.error("No response from TAMU API. Check network and base URL.")
+                    elif isinstance(test_resp, str) and test_resp.startswith("__error__"):
+                        st.error("TAMU API call failed. See raw details below.")
+                        with st.expander("TAMU raw error"):
+                            st.code(test_resp)
+                    else:
+                        st.success("TAMU API reachable (response shown below).")
+                        with st.expander("TAMU test response"):
+                            st.code(test_resp)
+                except Exception as e:
+                    st.error(f"TAMU test failed: {e}")
+else:
+    # clear any prior tamu session keys when no api key present
+    st.session_state.pop('tamu_api_key', None)
+    st.session_state.pop('tamu_base_url', None)
+    st.session_state.pop('tamu_mock', None)
+    st.session_state.pop('tamu_model', None)
 
 
 # parameter keys (used by auto-tune prompt)
 param_keys = ['sh','sw','sstar','sfc','n','zr','ks','ew','emax','beta','s0']
+# Build a parameter snapshot (used by prompts). Use stored session values or defaults if present.
+p = {k: st.session_state.get(k, st.session_state.get('param_defaults', {}).get(k)) for k in param_keys}
 
-# Auto-tune removed. AI features have been disabled per user request.
-
-# --- SIDEBAR: PARAMETERS ---
-
-# Use session_state-backed widgets for parameters so they can be updated programmatically
-st.sidebar.subheader("Model Parameters")
-st.sidebar.write("(these can be auto-tuned by the AI)")
-st.sidebar.number_input("Hygroscopic Point (sh)", 0.0, 1.0, 0.08, format="%.2f", key='sh')
-st.sidebar.number_input("Wilting Point (sw)", 0.0, 1.0, 0.11, format="%.2f", key='sw')
-st.sidebar.number_input("Stomatal Closure (s*)", 0.0, 1.0, 0.33, format="%.2f", key='sstar')
-st.sidebar.number_input("Field Capacity (sfc)", 0.0, 1.0, 0.40, format="%.2f", key='sfc')
-st.sidebar.number_input("Porosity (n)", 0.1, 1.0, 0.55, format="%.2f", key='n')
-st.sidebar.number_input("Root Depth (Zr) [mm]", 10.0, 2000.0, 500.0, key='zr')
-st.sidebar.number_input("Saturated Conductivity (Ks) [mm/day]", 0.0, 1000.0, 200.0, key='ks')
-st.sidebar.number_input("Evap at Wilting (Ew) [mm/day]", 0.0, 10.0, 0.1, key='ew')
-st.sidebar.number_input("Max Evap (Emax) [mm/day]", 0.0, 20.0, 5.0, key='emax')
-st.sidebar.number_input("Leakage Parameter (Beta)", 0.0, 20.0, 3.0, key='beta')
-st.sidebar.slider("Initial Soil Moisture (s0)", 0.0, 1.0, 0.3, key='s0')
-
-# Build parameter dict from session_state
-p = {k: st.session_state.get(k) for k in param_keys}
-
-# Auto-tune (TAMU) control
+# Auto-tune (TAMU) control placed BEFORE the parameter widgets so applying values updates widgets on this run
 with st.sidebar.container():
-    st.markdown("---")
-    st.write("AI: Auto-tune model parameters")
-    if st.button("Auto-Tune parameters (TAMU)", key="auto_tune"):
+    # Trigger an Auto-Tune request which stores parsed suggestions into session state.
+    if st.button("Auto-Tune parameters", key="auto_tune"):
         # Build a prompt that includes current parameter values and recent metrics
         last = st.session_state.get('last_results')
         try:
@@ -410,7 +507,13 @@ with st.sidebar.container():
             "'sh','sw','sstar','sfc','n','zr','ks','ew','emax','beta','s0'. Do not include extra text."
         )
 
-        resp = call_tamu_api(tamu_api_key or "", prompt, model=effective_tamu_model, base_url=tamu_base_url, mock=tamu_mock)
+        resp = call_tamu_api(
+            tamu_api_key or "",
+            prompt,
+            model=str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL),
+            base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
+            mock=bool(tamu_mock),
+        )
         if not resp:
             st.error("No response from TAMU API. Check your API key and network.")
         elif isinstance(resp, str) and resp.startswith("__error__"):
@@ -424,33 +527,57 @@ with st.sidebar.container():
                 with st.expander("TAMU raw response"):
                     st.code(resp)
             else:
-                # Show suggestions and offer Apply / Undo
-                st.sidebar.success("Received suggested parameters from TAMU")
-                with st.sidebar.expander("Suggested parameters (TAMU)", expanded=True):
-                    st.json(parsed)
-                    if st.button("Apply suggested parameters", key="apply_tamu_params"):
-                        # Save current params for undo
-                        hist = st.session_state.setdefault('param_history', [])
-                        hist.append({k: st.session_state.get(k) for k in param_keys})
-                        # Apply suggested values where present
-                        for k, v in parsed.items():
-                            if k in param_keys:
-                                try:
-                                    st.session_state[k] = float(v)
-                                except Exception:
-                                    # ignore non-numeric
-                                    pass
-                        st.success("Applied suggested parameters")
-                    if st.button("Undo last parameter apply", key="undo_tamu_params"):
-                        hist = st.session_state.get('param_history', [])
-                        if hist:
-                            last_params = hist.pop()
-                            for k, v in last_params.items():
-                                st.session_state[k] = v
-                            st.success("Reverted to previous parameters")
-                        else:
-                            st.info("No previous parameter snapshot available to undo.")
+                # Persist suggestions so they survive reruns (Apply is a separate click)
+                st.session_state['tamu_suggestions'] = parsed
 
+    # If we have persisted suggestions, show them (this makes Apply available across reruns)
+    if st.session_state.get('tamu_suggestions'):
+        st.sidebar.success("Received suggested parameters from TAMU")
+        with st.sidebar.expander("Suggested parameters (TAMU)", expanded=True):
+            suggestions = st.session_state.get('tamu_suggestions', {})
+            st.json(suggestions)
+            if st.button("Apply suggested parameters", key="apply_tamu_params"):
+                # Save current params for undo
+                hist = st.session_state.setdefault('param_history', [])
+                hist.append({k: st.session_state.get(k) for k in param_keys})
+                # Apply suggested values where present (read from persisted suggestions)
+                for k, v in (suggestions or {}).items():
+                    if k in param_keys:
+                        try:
+                            # allow numbers or numeric strings and clamp to allowed ranges
+                            st.session_state[k] = clamp_param_value(k, v)
+                        except Exception:
+                            # if conversion fails, still set the raw value
+                            st.session_state[k] = v
+                st.success("Applied suggested parameters")
+            if st.button("Undo last parameter apply", key="undo_tamu_params"):
+                hist = st.session_state.get('param_history', [])
+                if hist:
+                    last_params = hist.pop()
+                    for k, v in last_params.items():
+                        st.session_state[k] = v
+                    st.success("Reverted to previous parameters")
+                else:
+                    st.info("No previous parameter snapshot available to undo.")
+
+# --- SIDEBAR: PARAMETERS ---
+
+# Use session_state-backed widgets for parameters so they can be updated programmatically
+st.sidebar.subheader("Model Parameters")
+st.sidebar.number_input("Hygroscopic Point (sh)", 0.0, 1.0, value=st.session_state.get('sh', 0.08), format="%.2f", key='sh')
+st.sidebar.number_input("Wilting Point (sw)", 0.0, 1.0, value=st.session_state.get('sw', 0.11), format="%.2f", key='sw')
+st.sidebar.number_input("Stomatal Closure (s*)", 0.0, 1.0, value=st.session_state.get('sstar', 0.33), format="%.2f", key='sstar')
+st.sidebar.number_input("Field Capacity (sfc)", 0.0, 1.0, value=st.session_state.get('sfc', 0.40), format="%.2f", key='sfc')
+st.sidebar.number_input("Porosity (n)", 0.1, 1.0, value=st.session_state.get('n', 0.55), format="%.2f", key='n')
+st.sidebar.number_input("Root Depth (Zr) [mm]", 10.0, 2000.0, value=st.session_state.get('zr', 500.0), key='zr')
+st.sidebar.number_input("Saturated Conductivity (Ks) [mm/day]", 0.0, 1000.0, value=st.session_state.get('ks', 200.0), key='ks')
+st.sidebar.number_input("Evap at Wilting (Ew) [mm/day]", 0.0, 10.0, value=st.session_state.get('ew', 0.1), key='ew')
+st.sidebar.number_input("Max Evap (Emax) [mm/day]", 0.0, 20.0, value=st.session_state.get('emax', 5.0), key='emax')
+st.sidebar.number_input("Leakage Parameter (Beta)", 0.0, 20.0, value=st.session_state.get('beta', 3.0), key='beta')
+st.sidebar.slider("Initial Soil Moisture (s0)", 0.0, 1.0, value=st.session_state.get('s0', 0.3), key='s0')
+
+# Build parameter dict from session_state
+p = {k: st.session_state.get(k) for k in param_keys}
 # --- WEATHER DATA ---
 st.header("Step 1: Weather Data")
 
@@ -535,11 +662,11 @@ if st.button("Run Simulation", type="primary"):
             try:
                 st.session_state['last_results'] = results
                 st.session_state['last_results_ts'] = datetime.now().isoformat()
+                # mark that we've rendered this results set on this run so persisted rendering doesn't duplicate
+                st.session_state['last_results_rendered_ts'] = st.session_state['last_results_ts']
             except Exception:
                 # if session_state can't store the DataFrame for any reason, ignore
                 pass
-
-            st.markdown("---")
 
             # 1) Precipitation (inputs) — Rain & Canopy Interception
             fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
@@ -570,60 +697,72 @@ if st.button("Run Simulation", type="primary"):
             csv = results.to_csv(index=False).encode('utf-8')
             st.download_button("Download Results", csv, "simulation_results.csv", "text/csv")
 
-            # TAMU AI summary (optional)
-            if tamu_api_key or tamu_mock:
-                token_to_use = tamu_api_key
-                if st.button("Generate AI Summary (include model results)"):
-                    with st.spinner("Contacting TAMU AI for a summary..."):
-                        prompt = f"""
-Provide a short, user-facing summary (3-5 sentences) of the simulation results for location {st.session_state.get('location_name','(unknown)')} (Lat:{st.session_state.get('loc_lat','?')}, Lon:{st.session_state.get('loc_lon','?')}).
-Include the following numeric results: total_rain={total_rain:.2f} mm, total_et={total_et:.2f} mm, total_runoff={total_runoff:.2f} mm, mean_soil={mean_soil:.3f}.
-Return two things: (1) a short plain-text summary, and (2) a JSON object exactly between markers JSON_START and JSON_END containing keys: 'total_rain','total_et','total_runoff','mean_soil','recommendation'.
-Example JSON:
-JSON_START
-{
-  "total_rain": {total_rain:.2f},
-  "total_et": {total_et:.2f},
-  "total_runoff": {total_runoff:.2f},
-  "mean_soil": {mean_soil:.3f},
-  "recommendation": "short recommendation"
-}
-JSON_END
-Do not include extra commentary outside the requested text and JSON.
-"""
-                        if tamu_mock:
-                            resp = '{"message":"This is a mocked TAMU response."}\nJSON_START\n{"total_rain":' + f'{total_rain:.2f}' + ',"total_et":' + f'{total_et:.2f}' + ',"total_runoff":' + f'{total_runoff:.2f}' + ',"mean_soil":' + f'{mean_soil:.3f}' + ',"recommendation":"mocked suggestion"}\nJSON_END'
-                        else:
-                            resp = call_tamu_api(token_to_use or "", prompt, model=effective_tamu_model, base_url=tamu_base_url, mock=tamu_mock)
-                    # log and show
-                    if not resp:
-                        st.error("No response from TAMU AI. Check API key and network connectivity.")
-                        with st.expander("Raw AI response"):
-                            st.code(str(resp) or "(no response)")
-                    elif isinstance(resp, str) and resp.startswith("__error__"):
-                        st.error("AI request failed (network or DNS). Check your internet connection and the TAMU API host.")
-                        with st.expander("Raw AI response (error)"):
-                            st.code(resp)
-                    else:
-                        parsed_summary = parse_ai_json(resp or "")
-                        with st.expander("AI raw response"):
-                            st.code(resp or "(no response)")
-                        if parsed_summary:
-                            st.markdown("### AI Summary")
-                            st.info(resp.split('JSON_START')[0].strip() if 'JSON_START' in (resp or '') else (resp or ""))
+            # Summary placeholder (renders right after metrics). We render existing summary
+            # if available, otherwise provide a Generate button that uses current session settings.
+            summary_placeholder = st.empty()
+            try:
+                def _render_summary_in_placeholder(resp_text):
+                    parsed = parse_ai_json(resp_text or "")
+                    with summary_placeholder.container():
+                        st.markdown("### AI Summary")
+                        plain = resp_text.split('JSON_START')[0].strip() if resp_text and 'JSON_START' in resp_text else (resp_text or "")
+                        if plain:
+                            st.info(plain)
+                        if parsed:
                             st.subheader("AI structured summary")
-                            st.json(parsed_summary)
-                            st.session_state['ai_summary'] = resp
-                            st.session_state['ai_summary_json'] = parsed_summary
+                            st.json(parsed)
                         else:
-                            st.error("AI did not return structured JSON. See raw response in the expander.")
+                            st.write("No structured JSON available in AI response.")
+
+                # If an AI summary has already been generated for these results, show it
+                if st.session_state.get('ai_summary') and st.session_state.get('last_results_ai_ts') == st.session_state.get('last_results_ts'):
+                    _render_summary_in_placeholder(st.session_state.get('ai_summary'))
+                else:
+                    # show a generate button in the placeholder
+                    with summary_placeholder.container():
+                        st.markdown("### AI Summary")
+                        st.write("No AI summary generated for these results yet.")
+                        if st.button("Generate AI Summary (include model results)", key="generate_ai_after_run"):
+                            # Prefer persisted results so this button works across reruns
+                            rs = st.session_state.get('last_results') or results
+                            if rs is None:
+                                st.error("No results available to summarize. Run a simulation first.")
+                            else:
+                                resp = generate_and_store_summary(rs)
+                                if resp:
+                                    _render_summary_in_placeholder(resp)
+                                else:
+                                    st.error("AI summary generation failed. See raw response (if any) in session state.")
+
+                # If no AI summary exists for these results yet, generate one synchronously (legacy behavior).
+                try:
+                    need_gen = bool(st.session_state.get('last_results_ts') and st.session_state.get('last_results_ai_ts') != st.session_state.get('last_results_ts'))
+                    if need_gen:
+                        rs = st.session_state.get('last_results') or results
+                        if rs is not None:
+                            resp = generate_and_store_summary(rs)
+                            if resp:
+                                _render_summary_in_placeholder(resp)
+                            else:
+                                # If generation failed but we have some stored ai_summary for this ts, show it
+                                if st.session_state.get('ai_summary') and st.session_state.get('last_results_ai_ts') == st.session_state.get('last_results_ts'):
+                                    _render_summary_in_placeholder(st.session_state.get('ai_summary'))
+                                else:
+                                    st.warning("AI summary generation did not return a result. Check TAMU API settings.")
+                except Exception:
+                    pass
+            except Exception:
+                pass
             
         except Exception as e:
             st.error(f"An error occurred: {e}")
             st.write("Check your CSV columns. They must be 'Date' and 'Rain'.")
 
 # If there are persisted results from a previous run, render them so summaries persist across reruns
-if 'last_results' in st.session_state:
+# Avoid duplicating the immediate results we just rendered in the Run Simulation flow by
+# checking a rendered timestamp. If the rendered timestamp matches the results timestamp,
+# we've already shown them above and can skip the persisted block.
+if 'last_results' in st.session_state and st.session_state.get('last_results_rendered_ts') != st.session_state.get('last_results_ts'):
     try:
         results = st.session_state['last_results']
         st.header("Step 2: Results")
@@ -643,8 +782,6 @@ if 'last_results' in st.session_state:
         cols[3].metric("Total Runoff", f"{total_runoff:.1f} mm")
         cols[4].metric("Total ET", f"{total_et:.1f} mm")
         cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
-
-        st.markdown("---")
 
         fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
         fig_rain_ci.add_trace(go.Scatter(x=results['Date'], y=results['i'], mode='lines', name='Interception (CI) (mm)', line=dict(color='orange')))

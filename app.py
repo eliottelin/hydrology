@@ -692,6 +692,10 @@ if 'last_results' in st.session_state:
     cols[4].metric("Total ET", f"{total_et:.1f} mm")
     cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
 
+    # Render the AI summary block
+    # Note: We use the function defined earlier in your code
+    show_ai_summary_block(results, button_key="generate_ai_summary_persistent")
+
     fig_rain_ci = px.bar(results, x='Date', y='Rain', labels={'Rain': 'Precipitation (mm)'}, title="Precipitation & Canopy Interception (mm)")
     fig_rain_ci.add_trace(go.Scatter(x=results['Date'], y=results['i'], mode='lines', name='Interception (CI) (mm)', line=dict(color='orange')))
     fig_rain_ci.update_yaxes(title_text='Precipitation (mm)')
@@ -715,7 +719,3 @@ if 'last_results' in st.session_state:
 
     csv = results.to_csv(index=False).encode('utf-8')
     st.download_button("Download Results", csv, "simulation_results.csv", "text/csv")
-
-    # Render the AI summary block
-    # Note: We use the function defined earlier in your code
-    show_ai_summary_block(results, button_key="generate_ai_summary_persistent")

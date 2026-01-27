@@ -157,8 +157,15 @@ def call_tamu_api(api_key: str, prompt: str, model: str = DEFAULT_TAMU_MODEL, ba
 
 def generate_and_store_summary(results_df):
     """Generate AI summary for a given results DataFrame and store into session_state.
-    Uses session_state values for token/model/base_url/mock. Returns the raw response or None.
+    Uses session_state values for token/model/base_url/mock.
+    On success, stores 'ai_summary' and 'ai_summary_json'.
+    On failure, stores an error message in 'ai_summary_error'.
     """
+    # Clear previous summary/error states before generating a new one
+    st.session_state.pop('ai_summary', None)
+    st.session_state.pop('ai_summary_json', None)
+    st.session_state.pop('ai_summary_error', None)
+
     if results_df is None:
         return None
     token = st.session_state.get('tamu_api_key')
@@ -172,20 +179,56 @@ def generate_and_store_summary(results_df):
         ms = float(results_df['s'].mean())
     except Exception:
         tr = te = tq = ms = 0.0
+
+    # 1. Get Context: Retrieve soil parameters to make the AI smarter
+    sw_val = st.session_state.get('sw', 0.11)
+    sfc_val = st.session_state.get('sfc', 0.40)
+    sstar_val = st.session_state.get('sstar', 0.33)
+    sh_val = st.session_state.get('sh', 0.08)
+    n_val = st.session_state.get('n', 0.55)
+    zr_val = st.session_state.get('zr', 500.0)
+    ks_val = st.session_state.get('ks', 200.0)
+
     prompt = f"""
-Provide a short, user-facing summary (3-5 sentences) of the simulation results for location {st.session_state.get('location_name','(unknown)')} (Lat:{st.session_state.get('loc_lat','?')}, Lon:{st.session_state.get('loc_lon','?')}).
-Include the following numeric results: total_rain={tr:.2f} mm, total_et={te:.2f} mm, total_runoff={tq:.2f} mm, mean_soil={ms:.3f}.
-Return two things: (1) a short plain-text summary, and (2) a JSON object exactly between markers JSON_START and JSON_END containing keys: 'total_rain','total_et','total_runoff','mean_soil','recommendation'.
-Do not include extra commentary outside the requested text and JSON.
+Act as an expert Hydrologist and Agricultural Consultant. Analyze the water balance simulation for {st.session_state.get('location_name','(unknown)')}.
+
+Physical Context (Critical for analysis):
+- Soil Wilting Point (sw): {sw_val} (Below this, plants suffer water stress).
+- Field Capacity (sfc): {sfc_val} (Above this, water is lost to drainage/runoff).
+- Stomatal Closure Point (s*): {sstar_val} (Plants start closing stomata below this).
+- Hygroscopic Point (sh): {sh_val} (Water unavailable to plants).
+- Porosity (n): {n_val} (Total void space).
+- Root Depth (Zr): {zr_val} mm (Active soil layer depth).
+- Saturated Conductivity (Ks): {ks_val} mm/day (Max drainage rate).
+
+Simulation Results:
+- Total Rain: {tr:.2f} mm
+- Total ET (Productive Use): {te:.2f} mm
+- Total Runoff (Loss): {tq:.2f} mm
+- Average Soil Moisture: {ms:.3f}
+
+Task:
+1. Write a 3-5 sentence technical summary. Specifically compare the 'Average Soil Moisture' to the Wilting Point and Field Capacity. Was the soil healthy, too dry (stressed), or saturated (leaking)? Use markdown bolding (e.g. **value**) for all numeric values and statistics in the text.
+2. Evaluate the "Water Efficiency": Did most rain become productive ET, or was it lost to runoff?
+3. Return a JSON object exactly between markers JSON_START and JSON_END with keys: 'recommendation', 'simple_summary'.
+4. The 'recommendation' field must be specific (e.g., "Implement drainage to handle saturation" or "Apply irrigation to prevent hitting wilting point").
+5. The 'simple_summary' field must be a very simple, non-technical explanation (e.g., "It was too dry, so plants likely struggled.").
 """
     resp = call_tamu_api(token or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
+
     if resp and not (isinstance(resp, str) and resp.startswith("__error__")):
         st.session_state['ai_summary'] = resp
         parsed = parse_ai_json(resp or "")
         if parsed:
             st.session_state['ai_summary_json'] = parsed
+        else:
+            st.session_state['ai_summary_error'] = "AI response received, but failed to parse structured JSON."
         st.session_state['last_results_ai_ts'] = st.session_state.get('last_results_ts')
         return resp
+    elif isinstance(resp, str) and resp.startswith("__error__"):
+        st.session_state['ai_summary_error'] = f"AI request failed: {resp}"
+    else:
+        st.session_state['ai_summary_error'] = "No response from TAMU AI. Check API key and network connectivity."
     return None
 
 
@@ -227,57 +270,58 @@ def fetch_tamu_models(api_key: str, base_url: str = "https://chat-api.tamu.ai", 
         return []
 
 
-def show_ai_summary_block(results, button_key: str = "generate_ai_summary"):
-    """Render AI summary controls for provided results DataFrame. Stores summary in session_state['ai_summary'].
-    This is safe to call multiple times; uses a stable button key so it persists across reruns.
-    """
+def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persistent"):
+    """Render a formatted AI summary and provide controls to generate it."""
     if results is None:
         return
+
     st.markdown("---")
-    with st.expander("AI: Generate summary and structured JSON", expanded=False):
-        st.write("Generate a concise summary and a small JSON payload with metrics. Requires TAMU API key (or mock enabled).")
-        if st.button("Generate AI Summary (include model results)", key=button_key):
-            # Resolve runtime values from session_state (avoid relying on outer names)
-            token_to_use = st.session_state.get('tamu_api_key')
-            model_to_use = str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL)
-            base_to_use = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
-            mock_mode = bool(st.session_state.get('tamu_mock', False))
+    st.subheader("AI-Generated Summary")
+
+    # Display any error from the last generation attempt
+    if 'ai_summary_error' in st.session_state:
+        st.error(st.session_state.get('ai_summary_error'))
+
+    # Display existing summary in a clean, formatted way
+    if 'ai_summary' in st.session_state:
+        raw_summary = st.session_state.get('ai_summary', '')
+        parsed_json = st.session_state.get('ai_summary_json')
+
+        # 1. Parse narrative text from raw response
+        narrative = raw_summary
+        if "JSON_START" in narrative:
+            narrative = narrative.split("JSON_START")[0].strip()
+
+        # 2. Display Narrative
+        if narrative:
+            st.markdown(narrative)
+        # Fallback for malformed response with no narrative part
+        elif not parsed_json:
+            st.markdown(raw_summary)
+
+        # 3. Display Metrics and Recommendation from JSON
+        if parsed_json and isinstance(parsed_json, dict):
+            simple_summary = parsed_json.get('simple_summary')
+            if simple_summary:
+                st.info(f"**Simple Summary:** {simple_summary}", icon="👋")
+
+            recommendation = parsed_json.get('recommendation')
+            if recommendation:
+                st.success(f"**Insight:** {recommendation}", icon="💡")
+    else:
+        # Only show this if there's no error message either
+        if 'ai_summary_error' not in st.session_state:
+            st.info("Click 'Generate / Regenerate AI Summary' below to get an analysis of the results (Requires TAMU API key).")
+
+    # Controls to generate/regenerate the summary
+    with st.expander("Generate / Regenerate AI Summary", expanded=('ai_summary' not in st.session_state)):
+
+        button_text = "Regenerate AI Summary" if 'ai_summary' in st.session_state else "Generate AI Summary"
+
+        if st.button(button_text, key=button_key):
             with st.spinner("Contacting TAMU AI for a summary..."):
-                try:
-                    total_rain = float(results['Rain'].sum())
-                    total_et = float(results['et'].sum())
-                    total_runoff = float(results['q'].sum())
-                    mean_soil = float(results['s'].mean())
-                except Exception:
-                    total_rain = total_et = total_runoff = mean_soil = 0.0
-                prompt = f"""
-Provide a short, user-facing summary (3-5 sentences) of the simulation results for location {st.session_state.get('location_name','(unknown)')} (Lat:{st.session_state.get('loc_lat','?')}, Lon:{st.session_state.get('loc_lon','?')}).
-Include the following numeric results: total_rain={total_rain:.2f} mm, total_et={total_et:.2f} mm, total_runoff={total_runoff:.2f} mm, mean_soil={mean_soil:.3f}.
-Return two things: (1) a short plain-text summary, and (2) a JSON object exactly between markers JSON_START and JSON_END containing keys: 'total_rain','total_et','total_runoff','mean_soil','recommendation'.
-Do not include extra commentary outside the requested text and JSON.
-"""
-                resp = call_tamu_api(token_to_use or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
-                if not resp:
-                    st.error("No response from TAMU AI. Check API key and network connectivity.")
-                elif isinstance(resp, str) and resp.startswith("__error__"):
-                    st.error("AI request failed (network or DNS). See raw error below.")
-                    with st.expander("Raw AI error"):
-                        st.code(resp)
-                else:
-                    st.session_state['ai_summary'] = resp
-                    parsed = parse_ai_json(resp or "")
-                    if parsed:
-                        st.session_state['ai_summary_json'] = parsed
-                    with st.expander("AI raw response", expanded=True):
-                        st.code(resp or "(no response)")
-        # show any previously generated summary
-        if 'ai_summary' in st.session_state:
-            st.markdown("**Last AI summary (raw)**")
-            with st.expander("Show last AI summary", expanded=False):
-                st.code(st.session_state.get('ai_summary'))
-            if 'ai_summary_json' in st.session_state:
-                st.markdown("**Last AI structured JSON**")
-                st.json(st.session_state.get('ai_summary_json'))
+                generate_and_store_summary(results)
+                st.rerun()
 
 
 def get_precipitation(lat: float, lon: float, start_date, end_date) -> pd.DataFrame:
@@ -304,7 +348,8 @@ def get_precipitation(lat: float, lon: float, start_date, end_date) -> pd.DataFr
 st.set_page_config(page_title="Hydrology Lab Model", layout="wide")
 
 st.title("🌊 Hydrology Lab: Water Balance Simulation")
-st.markdown("This app simulates soil moisture dynamics based on the **Laio et al. (2001)** model.")
+url = "https://doi.org/10.1016/S0309-1708(01)00005-7"
+st.markdown("This app simulates soil moisture dynamics based on the [**Laio et al. (2001)** model.](%s)" % url)
 
 # --- SIDEBAR: Location (simple Open-Meteo geocoding) ---
 def get_geocoding_results(query: str):
@@ -520,13 +565,29 @@ with st.sidebar.container():
             lr = let = lq = ls = 0.0
             sample_days = 0
 
-        prompt = (
-            "You are an expert hydrologist. Suggest tuned model parameters for the Laio et al. water-balance model. "
-            f"Current parameter values: {json.dumps(p)}. "
-            f"Recent metrics over {sample_days} days: total_rain={lr:.2f} mm, total_et={let:.2f} mm, total_runoff={lq:.2f} mm, mean_soil={ls:.3f}. "
-            "Return a JSON object between markers JSON_START and JSON_END with numeric values for keys: "
-            "'sh','sw','sstar','sfc','n','zr','ks','ew','emax','beta','s0'. Do not include extra text."
-        )
+        loc_name = st.session_state.get('location_name', 'Unknown Location')
+        loc_lat = st.session_state.get('loc_lat', 'Unknown')
+        loc_lon = st.session_state.get('loc_lon', 'Unknown')
+
+        prompt = f"""
+Act as an expert Hydrologist. Suggest calibrated model parameters for the Laio et al. (2001) water-balance model appropriate for the following location and climate.
+
+Location: {loc_name} (Lat: {loc_lat}, Lon: {loc_lon})
+
+Current Simulation Context ({sample_days} days):
+- Total Rain: {lr:.2f} mm
+- Simulated ET: {let:.2f} mm
+- Simulated Runoff: {lq:.2f} mm
+- Mean Soil Moisture: {ls:.3f}
+
+Current Parameters:
+{json.dumps(p)}
+
+Task:
+Suggest a tuned set of parameters ('sh', 'sw', 'sstar', 'sfc', 'n', 'zr', 'ks', 'ew', 'emax', 'beta', 's0') that are physically realistic for the soil texture and vegetation type typically found at this location. Adjust values to ensure water balance components (ET vs Runoff) are reasonable for this climate.
+
+Return a JSON object exactly between markers JSON_START and JSON_END.
+"""
 
         resp = call_tamu_api(
             tamu_api_key or "",
@@ -664,8 +725,10 @@ if st.button("Run Simulation", type="primary"):
             st.session_state['last_results_ts'] = datetime.now().isoformat()
             
             # (Optional) Clear old summaries if new simulation runs
-            if 'ai_summary' in st.session_state:
-                del st.session_state['ai_summary']
+            # Clear old AI summary since it's now invalid for the new results
+            st.session_state.pop('ai_summary', None)
+            st.session_state.pop('ai_summary_json', None)
+            st.session_state.pop('ai_summary_error', None)
                 
         except Exception as e:
             st.error(f"An error occurred: {e}")
@@ -676,6 +739,16 @@ if 'last_results' in st.session_state:
     results = st.session_state['last_results']
     st.header("Step 2: Results")
 
+    # Inject custom CSS to reduce the font size of the metric values.
+    # This helps prevent the units from being hidden when the sidebar is open.
+    st.markdown("""
+        <style>
+        [data-testid="stMetricValue"] {
+            font-size: 1.75rem;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     total_rain = results['Rain'].sum()
     mean_rain = results['Rain'].mean()
     total_interception = results['i'].sum()
@@ -684,13 +757,14 @@ if 'last_results' in st.session_state:
     total_et = results['et'].sum()
     total_leakage = results['l'].sum()
 
-    cols = st.columns(6)
+    cols = st.columns(7)
     cols[0].metric("Total Rain", f"{total_rain:.1f} mm")
     cols[1].metric("Mean Rain/day", f"{mean_rain:.2f} mm/d")
     cols[2].metric("Total Interception", f"{total_interception:.1f} mm")
     cols[3].metric("Total Runoff", f"{total_runoff:.1f} mm")
     cols[4].metric("Total ET", f"{total_et:.1f} mm")
-    cols[5].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
+    cols[5].metric("Total Leakage", f"{total_leakage:.1f} mm")
+    cols[6].metric("Mean Soil Moisture", f"{mean_soil:.2f}")
 
     # Render the AI summary block
     # Note: We use the function defined earlier in your code

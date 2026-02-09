@@ -190,7 +190,7 @@ def generate_and_store_summary(results_df):
     ks_val = st.session_state.get('ks', 200.0)
 
     prompt = f"""
-Act as an expert Hydrologist and Agricultural Consultant. Analyze the water balance simulation for {st.session_state.get('location_name','(unknown)')}.
+Act as an expert Hydrologist and Agricultural Consultant. Analyze the water balance simulation for {st.session_state.get('location_name','(unknown)')} (Lat: {st.session_state.get('loc_lat', 'unknown')}, Lon: {st.session_state.get('loc_lon', 'unknown')}).
 
 Physical Context (Critical for analysis):
 - Soil Wilting Point (sw): {sw_val} (Below this, plants suffer water stress).
@@ -201,18 +201,22 @@ Physical Context (Critical for analysis):
 - Root Depth (Zr): {zr_val} mm (Active soil layer depth).
 - Saturated Conductivity (Ks): {ks_val} mm/day (Max drainage rate).
 
-Simulation Results:
+Simulation Results for {st.session_state.get('location_name','(unknown)')}:
 - Total Rain: {tr:.2f} mm
 - Total ET (Productive Use): {te:.2f} mm
 - Total Runoff (Loss): {tq:.2f} mm
 - Average Soil Moisture: {ms:.3f}
 
 Task:
-1. Write a 3-5 sentence technical summary. Specifically compare the 'Average Soil Moisture' to the Wilting Point and Field Capacity. Was the soil healthy, too dry (stressed), or saturated (leaking)? Use markdown bolding (e.g. **value**) for all numeric values and statistics in the text.
-2. Evaluate the "Water Efficiency": Did most rain become productive ET, or was it lost to runoff?
-3. Return a JSON object exactly between markers JSON_START and JSON_END with keys: 'recommendation', 'simple_summary'.
-4. The 'recommendation' field must be specific (e.g., "Implement drainage to handle saturation" or "Apply irrigation to prevent hitting wilting point").
-5. The 'simple_summary' field must be a very simple, non-technical explanation (e.g., "It was too dry, so plants likely struggled.").
+1. Write a 3-5 sentence technical summary specific to {st.session_state.get('location_name','(unknown)')}. Compare the 'Average Soil Moisture' to the Wilting Point and Field Capacity thresholds. Was the soil healthy, too dry (stressed), or saturated (leaking)? Use markdown bolding (e.g. **value**) for all numeric values and statistics in the text.
+2. Evaluate the "Water Efficiency" at this location: Did most rain become productive ET, or was it lost to runoff? Consider typical climate patterns for this region.
+3. Explain the soil conditions and what they indicate about water availability at {st.session_state.get('location_name','(unknown)')}.
+4. Return a JSON object exactly between markers JSON_START and JSON_END with keys: 
+   - 'recommendation': Specific, location-appropriate adjustment (e.g., "For {st.session_state.get('location_name','(unknown)')}, implement drainage" or "Apply irrigation to prevent hitting wilting point")
+   - 'simple_summary': Very simple, non-technical explanation for this location
+   - 'soil_conditions_reasoning': Explanation of what the measured soil moisture and parameters reveal about {st.session_state.get('location_name','(unknown)')}'s soil behavior
+   - 'location_specific_factors': How regional climate, soil type, and vegetation at {st.session_state.get('location_name','(unknown)')} influence these results
+5. All recommendations and reasoning should explicitly reference {st.session_state.get('location_name','(unknown)')}.
 """
     resp = call_tamu_api(token or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
 
@@ -304,6 +308,14 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
             simple_summary = parsed_json.get('simple_summary')
             if simple_summary:
                 st.info(f"**Simple Summary:** {simple_summary}", icon="👋")
+
+            soil_reasoning = parsed_json.get('soil_conditions_reasoning')
+            if soil_reasoning:
+                st.markdown(f"**Soil Conditions Analysis:** {soil_reasoning}")
+
+            location_factors = parsed_json.get('location_specific_factors')
+            if location_factors:
+                st.markdown(f"**Location-Specific Factors:** {location_factors}")
 
             recommendation = parsed_json.get('recommendation')
             if recommendation:
@@ -584,9 +596,14 @@ Current Parameters:
 {json.dumps(p)}
 
 Task:
-Suggest a tuned set of parameters ('sh', 'sw', 'sstar', 'sfc', 'n', 'zr', 'ks', 'ew', 'emax', 'beta', 's0') that are physically realistic for the soil texture and vegetation type typically found at this location. Adjust values to ensure water balance components (ET vs Runoff) are reasonable for this climate.
+Suggest a tuned set of parameters ('sh', 'sw', 'sstar', 'sfc', 'n', 'zr', 'ks', 'ew', 'emax', 'beta', 's0') that are physically realistic for the soil texture and vegetation type typically found at {loc_name}. Adjust values to ensure water balance components (ET vs Runoff) are reasonable for this climate.
 
-Return a JSON object exactly between markers JSON_START and JSON_END.
+Return a JSON object exactly between markers JSON_START and JSON_END with the following structure:
+- Include all parameter values: sh, sw, sstar, sfc, n, zr, ks, ew, emax, beta, s0
+- Include 'soil_type': Inferred dominant soil texture class (e.g., "Sandy Loam", "Clay Loam")
+- Include 'soil_reasoning': Brief explanation of why you chose that soil type and parameter values based on {loc_name}'s climate and typical pedology
+- Include 'vegetation_type': Expected dominant vegetation for this location
+- Include 'climate_factors': How the local climate (precipitation patterns, temperature seasonality) influences the calibration
 """
 
         resp = call_tamu_api(
@@ -617,7 +634,23 @@ Return a JSON object exactly between markers JSON_START and JSON_END.
         st.sidebar.success("Received suggested parameters from TAMU")
         with st.sidebar.expander("Suggested parameters (TAMU)", expanded=True):
             suggestions = st.session_state.get('tamu_suggestions', {})
-            st.json(suggestions)
+            
+            # Display reasoning if available
+            if suggestions.get('soil_type'):
+                st.markdown(f"**Inferred Soil Type:** {suggestions['soil_type']}")
+            if suggestions.get('vegetation_type'):
+                st.markdown(f"**Expected Vegetation:** {suggestions['vegetation_type']}")
+            if suggestions.get('soil_reasoning'):
+                st.info(f"**Reasoning:** {suggestions['soil_reasoning']}")
+            if suggestions.get('climate_factors'):
+                st.markdown(f"**Climate Factors:** {suggestions['climate_factors']}")
+            
+            st.markdown("---")
+            st.markdown("**Parameter Values:**")
+            # Display only the parameter values
+            param_display = {k: v for k, v in suggestions.items() if k in param_keys}
+            st.json(param_display)
+            
             if st.button("Apply suggested parameters", key="apply_tamu_params"):
                 # Save current params for undo
                 hist = st.session_state.setdefault('param_history', [])

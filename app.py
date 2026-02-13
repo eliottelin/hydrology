@@ -155,6 +155,83 @@ def call_tamu_api(api_key: str, prompt: str, model: str = DEFAULT_TAMU_MODEL, ba
             return "__error__:unknown"
 
 
+def call_openai_api(api_key: str, prompt: str, model: str = "gpt-4", timeout: int = 30):
+    """Call the OpenAI chat completions endpoint and return assistant text or an error string prefixed with __error__.
+    Uses POST https://api.openai.com/v1/chat/completions
+    """
+    if not api_key:
+        return "__error__:NoAPIKey:No OpenAI API key provided"
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if r.status_code != 200:
+            return f"__error__:HTTP_{r.status_code}:{r.text}"
+        data = r.json()
+        choices = data.get("choices") or []
+        if choices:
+            message = choices[0].get("message", {})
+            content = message.get("content")
+            if content:
+                return content
+        return "__error__:NoContent:No content in response"
+    except requests.exceptions.RequestException as e:
+        return f"__error__:{e.__class__.__name__}:{str(e)}"
+    except Exception as e:
+        return f"__error__:UnexpectedError:{str(e)}"
+
+
+def call_gemini_api(api_key: str, prompt: str, model: str = "gemini-1.5-flash", timeout: int = 30):
+    """Call the Google Gemini API and return response text or an error string prefixed with __error__.
+    Uses REST API endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+    """
+    if not api_key:
+        return "__error__:NoAPIKey:No Gemini API key provided"
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+    }
+    try:
+        # API key is passed as query parameter for Gemini
+        r = requests.post(f"{url}?key={api_key}", headers=headers, json=payload, timeout=timeout)
+        if r.status_code != 200:
+            return f"__error__:HTTP_{r.status_code}:{r.text}"
+        data = r.json()
+        candidates = data.get("candidates") or []
+        if candidates:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts") or []
+            if parts:
+                text = parts[0].get("text")
+                if text:
+                    return text
+        return "__error__:NoContent:No content in response"
+    except requests.exceptions.RequestException as e:
+        return f"__error__:{e.__class__.__name__}:{str(e)}"
+    except Exception as e:
+        return f"__error__:UnexpectedError:{str(e)}"
+
+
+def call_ai_api(prompt: str, api_provider: str = "tamu", api_key: str = "", model: str = "", base_url: str = "https://chat-api.tamu.ai", mock: bool = False, timeout: int = 30):
+    """Unified function to call various AI APIs based on selected provider.
+    Returns assistant text or an error string prefixed with __error__.
+    """
+    if api_provider.lower() == "openai":
+        return call_openai_api(api_key, prompt, model or "gpt-4", timeout)
+    elif api_provider.lower() == "gemini":
+        return call_gemini_api(api_key, prompt, model or "gemini-1.5-flash", timeout)
+    else:  # default to TAMU
+        return call_tamu_api(api_key, prompt, model or DEFAULT_TAMU_MODEL, base_url, mock, timeout)
+
+
 def generate_and_store_summary(results_df):
     """Generate AI summary for a given results DataFrame and store into session_state.
     Uses session_state values for token/model/base_url/mock.
@@ -168,10 +245,28 @@ def generate_and_store_summary(results_df):
 
     if results_df is None:
         return None
-    token = st.session_state.get('tamu_api_key')
-    mock_mode = bool(st.session_state.get('tamu_mock', False))
-    model_to_use = str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL)
-    base_to_use = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+    
+    # Get the selected AI provider and corresponding API key
+    provider = st.session_state.get('ai_provider', 'tamu')
+    if provider == 'tamu':
+        token = st.session_state.get('tamu_api_key')
+        model_to_use = str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL)
+        base_url = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+        mock_mode = bool(st.session_state.get('tamu_mock', False))
+    elif provider == 'openai':
+        token = st.session_state.get('openai_api_key')
+        model_to_use = st.session_state.get('openai_model', 'gpt-4')
+        base_url = ""
+        mock_mode = False
+    elif provider == 'gemini':
+        token = st.session_state.get('gemini_api_key')
+        model_to_use = st.session_state.get('gemini_model', 'gemini-1.5-flash')
+        base_url = ""
+        mock_mode = False
+    else:
+        st.session_state['ai_summary_error'] = "No AI provider selected"
+        return None
+    
     try:
         tr = float(results_df['Rain'].sum())
         te = float(results_df['et'].sum())
@@ -218,7 +313,14 @@ Task:
    - 'location_specific_factors': How regional climate, soil type, and vegetation at {st.session_state.get('location_name','(unknown)')} influence these results
 5. All recommendations and reasoning should explicitly reference {st.session_state.get('location_name','(unknown)')}.
 """
-    resp = call_tamu_api(token or "", prompt, model=model_to_use, base_url=base_to_use, mock=mock_mode)
+    resp = call_ai_api(
+        prompt,
+        api_provider=provider,
+        api_key=token or "",
+        model=model_to_use,
+        base_url=base_url,
+        mock=mock_mode
+    )
 
     if resp and not (isinstance(resp, str) and resp.startswith("__error__")):
         st.session_state['ai_summary'] = resp
@@ -232,7 +334,7 @@ Task:
     elif isinstance(resp, str) and resp.startswith("__error__"):
         st.session_state['ai_summary_error'] = f"AI request failed: {resp}"
     else:
-        st.session_state['ai_summary_error'] = "No response from TAMU AI. Check API key and network connectivity."
+        st.session_state['ai_summary_error'] = f"No response from {provider.upper()} API. Check API key and network connectivity."
     return None
 
 
@@ -274,6 +376,174 @@ def fetch_tamu_models(api_key: str, base_url: str = "https://chat-api.tamu.ai", 
         return []
 
 
+def fetch_soilgrids_data(lat: float, lon: float):
+    """Fetch soil properties from SoilGrids REST API for given coordinates.
+    Returns a dict with soil properties or None on failure.
+    https://rest.isric.org/soilgrids/v2.0/docs
+    """
+    try:
+        url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+        params = {
+            "lon": float(lon),
+            "lat": float(lat),
+            "property": ["clay", "sand", "silt", "organic_carbon"],
+            "depth": ["0-5cm", "5-15cm", "15-30cm", "30-60cm"],
+        }
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
+def infer_parameters_from_soilgrids(soilgrids_data: dict):
+    """Infer water balance model parameters from SoilGrids data.
+    Uses soil texture (clay/sand/silt percentages) to estimate parameters.
+    Returns a dict with estimated parameters and soil_type description.
+    """
+    if not soilgrids_data or 'properties' not in soilgrids_data:
+        return None
+    
+    try:
+        props = soilgrids_data.get('properties', {})
+        layers = props.get('layers', [])
+        if not layers:
+            return None
+        
+        # Use 0-5cm layer for topsoil properties
+        layer = layers[0]
+        depths = layer.get('depths', [])
+        if not depths:
+            return None
+        
+        depth_0_5 = depths[0]
+        
+        # Extract soil texture percentages (0-5cm layer, mean values)
+        clay_mean = depth_0_5.get('clay', {}).get('mean', 20.0) / 1000.0  # Convert from g/kg to fraction
+        sand_mean = depth_0_5.get('sand', {}).get('mean', 50.0) / 1000.0
+        silt_mean = depth_0_5.get('silt', {}).get('mean', 30.0) / 1000.0
+        org_carbon = depth_0_5.get('organic_carbon', {}).get('mean', 15.0) / 1000.0  # Convert from dg/kg to fraction
+        
+        # Normalize to fractions (0-1)
+        total = clay_mean + sand_mean + silt_mean
+        if total > 0:
+            clay = clay_mean / total
+            sand = sand_mean / total
+            silt = silt_mean / total
+        else:
+            clay, sand, silt = 0.2, 0.5, 0.3
+        
+        # Classify soil texture (USDA soil texture triangle)
+        soil_type = classify_soil_texture(clay, sand, silt)
+        
+        # Estimate water balance parameters based on soil texture
+        # Using typical values from soil physics literature
+        params = estimate_water_balance_parameters(clay, sand, silt, org_carbon)
+        params['soil_type'] = soil_type
+        params['clay_fraction'] = clay
+        params['sand_fraction'] = sand
+        params['silt_fraction'] = silt
+        params['organic_carbon'] = org_carbon
+        
+        return params
+    except Exception:
+        return None
+
+
+def classify_soil_texture(clay: float, sand: float, silt: float) -> str:
+    """Classify soil texture based on USDA soil texture triangle.
+    Returns soil texture class name.
+    """
+    clay_pct = clay * 100
+    sand_pct = sand * 100
+    silt_pct = silt * 100
+    
+    # USDA soil texture classification rules
+    if clay_pct < 27 and sand_pct > 52 and silt_pct < 50:
+        if sand_pct > 86:
+            return "Sand"
+        return "Sandy Loam"
+    elif clay_pct < 27 and (sand_pct <= 52 or silt_pct >= 50):
+        if silt_pct >= 80:
+            return "Silt"
+        elif silt_pct >= 50:
+            return "Silt Loam"
+        return "Loam"
+    elif clay_pct >= 27 and clay_pct < 40:
+        if sand_pct > 52:
+            return "Sandy Clay Loam"
+        return "Clay Loam"
+    elif clay_pct >= 40:
+        if sand_pct > 52:
+            return "Sandy Clay"
+        elif silt_pct >= 60:
+            return "Silty Clay"
+        return "Clay"
+    return "Loam"
+
+
+def estimate_water_balance_parameters(clay: float, sand: float, silt: float, org_carbon: float) -> dict:
+    """Estimate Laio et al. water balance parameters from soil texture and organic matter.
+    Uses empirical pedotransfer functions.
+    """
+    clay_pct = clay * 100
+    sand_pct = sand * 100
+    
+    # Adjust porosity (n) based on clay and organic content
+    # Sandy soils: ~0.4, loamy: ~0.45-0.50, clayey: ~0.50-0.55
+    base_porosity = 0.35 + (clay_pct * 0.002) + (org_carbon * 20)
+    n = min(max(base_porosity, 0.35), 0.60)
+    
+    # Field capacity (sfc) - higher in finer-textured soils
+    sfc = 0.15 + (clay_pct * 0.003) + (org_carbon * 10)
+    sfc = min(max(sfc, 0.15), 0.50)
+    
+    # Wilting point (sw) - also increases with clay
+    sw = max(0.05, sfc * 0.4)
+    
+    # Stomatal closure point (s*) - typically 0.5-0.7 of field capacity
+    sstar = sfc * 0.65
+    
+    # Hygroscopic point (sh) - typically 0.05-0.15
+    sh = max(0.05, sw * 0.5)
+    
+    # Saturated conductivity (Ks) - decreases with clay content
+    # Sandy: 300-500 mm/day, loamy: 100-300, clayey: 10-100
+    ks = max(10, 500 * (1 - (clay_pct / 100) ** 2))
+    
+    # Root depth (Zr) - typical values 300-700mm, slightly higher in sandy soils
+    zr = 400 + (sand_pct * 3)
+    zr = min(max(zr, 300), 750)
+    
+    # ET parameters - slightly higher in finer-textured soils
+    emax = 5.0 + (clay_pct * 0.05)
+    emax = min(max(emax, 3.0), 8.0)
+    
+    ew = emax * 0.02
+    
+    # Leakage parameter (beta) - lower in sandy soils, higher in clayey
+    beta = 0.5 + (clay_pct * 0.05)
+    beta = min(max(beta, 0.2), 5.0)
+    
+    # Initial soil moisture - set to halfway between sh and sfc
+    s0 = (sh + sfc) / 2
+    
+    return {
+        'sh': round(sh, 3),
+        'sw': round(sw, 3),
+        'sstar': round(sstar, 3),
+        'sfc': round(sfc, 3),
+        'n': round(n, 3),
+        'zr': round(zr, 1),
+        'ks': round(ks, 1),
+        'ew': round(ew, 3),
+        'emax': round(emax, 2),
+        'beta': round(beta, 2),
+        's0': round(s0, 3),
+    }
+
+
 def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persistent"):
     """Render a formatted AI summary and provide controls to generate it."""
     if results is None:
@@ -303,11 +573,17 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
         elif not parsed_json:
             st.markdown(raw_summary)
 
-        # 3. Display Metrics and Recommendation from JSON
+        # 3. Display Quick Summary and Recommendation First (at top)
         if parsed_json and isinstance(parsed_json, dict):
             simple_summary = parsed_json.get('simple_summary')
             if simple_summary:
                 st.info(f"**Simple Summary:** {simple_summary}", icon="👋")
+
+            recommendation = parsed_json.get('recommendation')
+            if recommendation:
+                st.success(f"**Insight:** {recommendation}", icon="💡")
+            
+            st.markdown("---")
 
             soil_reasoning = parsed_json.get('soil_conditions_reasoning')
             if soil_reasoning:
@@ -316,10 +592,6 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
             location_factors = parsed_json.get('location_specific_factors')
             if location_factors:
                 st.markdown(f"**Location-Specific Factors:** {location_factors}")
-
-            recommendation = parsed_json.get('recommendation')
-            if recommendation:
-                st.success(f"**Insight:** {recommendation}", icon="💡")
     else:
         # Only show this if there's no error message either
         if 'ai_summary_error' not in st.session_state:
@@ -456,104 +728,130 @@ with st.sidebar.expander("Fetch weather by coordinates", expanded=False):
         except Exception as e:
             st.error(f"Weather fetch failed: {e}")
 
-# --- TAMU AI settings (per-user token supported) ---
-st.sidebar.header("TAMU AI")
-tamu_api_key = st.sidebar.text_input("TAMU AI API Key (optional)", type="password")
-# Mirror the entered API key into session_state immediately so summary generation
-# and the Test/TAMU buttons work without needing to open the TAMU options expander.
-st.session_state['tamu_api_key'] = tamu_api_key
+# --- AI API Settings (supports TAMU, OpenAI, and Gemini) ---
+st.sidebar.header("AI API Settings")
+st.sidebar.markdown("Select which AI service to use for auto-tune and summaries")
 
-# Provide defaults so other code can reference these even when key not provided
-# Ensure these are concrete types (avoid passing None to helper functions)
-tamu_base_url = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
-tamu_mock = bool(st.session_state.get('tamu_mock', False))
-# Ensure base URL and mock flags exist in session_state for helpers to read.
-st.session_state.setdefault('tamu_base_url', tamu_base_url)
-st.session_state.setdefault('tamu_mock', tamu_mock)
+# Choose AI provider
+ai_provider = st.sidebar.radio(
+    "Select AI Provider:",
+    options=["TAMU AI", "OpenAI (ChatGPT)", "Google Gemini"],
+    index=0,
+    help="Choose which API to use. You only need to enter a key for your chosen provider."
+)
 
-# NOTE: summaries are now always generated automatically (background) after running a simulation.
+# Map provider name to internal identifier
+provider_map = {
+    "TAMU AI": "tamu",
+    "OpenAI (ChatGPT)": "openai",
+    "Google Gemini": "gemini"
+}
+selected_provider = provider_map[ai_provider]
+st.session_state['ai_provider'] = selected_provider
 
-# Convenience: quick reset of the TAMU model to the intended default if the user wants it
-if st.sidebar.button("Reset TAMU model to default"):
-    st.session_state['tamu_model'] = DEFAULT_TAMU_MODEL
-
-# Only show detailed TAMU options when an API key is provided (cleaner sidebar)
-if tamu_api_key:
-    with st.sidebar.expander("TAMU options", expanded=False):
-        tamu_base_url = st.text_input("TAMU API base URL", value=st.session_state.get('tamu_base_url', "https://chat-api.tamu.ai"))
-        tamu_mock = st.checkbox("Mock TAMU AI (dev)", value=st.session_state.get('tamu_mock', False))
-        # mirror into session_state so helper functions can read latest values
-        st.session_state['tamu_api_key'] = tamu_api_key
-        st.session_state['tamu_base_url'] = tamu_base_url
-        st.session_state['tamu_mock'] = tamu_mock
-
-        # Try to fetch available TAMU models and present as a dropdown when possible
-        available_models = []
-        if tamu_api_key and not tamu_mock:
-            try:
-                with st.spinner("Fetching TAMU models..."):
-                    available_models = fetch_tamu_models(
-                        tamu_api_key,
-                        base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
-                        mock=bool(tamu_mock),
-                    )
-            except Exception:
-                available_models = []
-
-        if available_models:
-            # use session_state key so selection persists
-            tamu_model = st.selectbox("TAMU Model", options=available_models, index=0, key='tamu_model')
-        else:
-            tamu_model = st.text_input("TAMU Model (enter id)", value=st.session_state.get('tamu_model', DEFAULT_TAMU_MODEL), key='tamu_model')
-
-        # normalize effective model string for downstream calls
-        effective_tamu_model = str(st.session_state.get('tamu_model') or tamu_model or DEFAULT_TAMU_MODEL)
-
-        if st.button("Test TAMU API"):
-            if not tamu_base_url:
-                st.error("Set the TAMU API base URL first.")
-            else:
-                # DNS preflight
+# API Key input (provider-specific)
+if ai_provider == "TAMU AI":
+    api_key_input = st.sidebar.text_input("TAMU AI API Key (optional)", type="password")
+    st.session_state['tamu_api_key'] = api_key_input
+    st.session_state['openai_api_key'] = None
+    st.session_state['gemini_api_key'] = None
+    
+    tamu_base_url = str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai")
+    tamu_mock = bool(st.session_state.get('tamu_mock', False))
+    st.session_state.setdefault('tamu_base_url', tamu_base_url)
+    st.session_state.setdefault('tamu_mock', tamu_mock)
+    
+    if st.sidebar.button("Reset TAMU model to default"):
+        st.session_state['tamu_model'] = DEFAULT_TAMU_MODEL
+    
+    if api_key_input:
+        with st.sidebar.expander("TAMU options", expanded=False):
+            tamu_base_url = st.text_input("TAMU API base URL", value=st.session_state.get('tamu_base_url', "https://chat-api.tamu.ai"))
+            tamu_mock = st.checkbox("Mock TAMU AI (dev)", value=st.session_state.get('tamu_mock', False))
+            st.session_state['tamu_base_url'] = tamu_base_url
+            st.session_state['tamu_mock'] = tamu_mock
+            
+            # Try to fetch available TAMU models
+            available_models = []
+            if api_key_input and not tamu_mock:
                 try:
-                    from urllib.parse import urlparse
-
-                    parsed = urlparse(tamu_base_url)
-                    host = parsed.hostname or tamu_base_url
-                    try:
-                        ip = socket.gethostbyname(host)
-                        st.success(f"Resolved host {host} -> {ip}")
-                    except Exception as dns_e:
-                        st.warning(f"Could not resolve host {host}: {dns_e}")
+                    with st.spinner("Fetching TAMU models..."):
+                        available_models = fetch_tamu_models(
+                            api_key_input,
+                            base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
+                            mock=bool(tamu_mock),
+                        )
                 except Exception:
-                    host = None
+                    available_models = []
+            
+            if available_models:
+                tamu_model = st.selectbox("TAMU Model", options=available_models, index=0, key='tamu_model')
+            else:
+                tamu_model = st.text_input("TAMU Model (enter id)", value=st.session_state.get('tamu_model', DEFAULT_TAMU_MODEL), key='tamu_model')
 
-                try:
-                    test_prompt = "Test connection from Hydrology app. Reply with short text 'OK'."
-                    test_resp = call_tamu_api(
-                        tamu_api_key or "",
-                        test_prompt,
-                        model=str(st.session_state.get('tamu_model') or effective_tamu_model or DEFAULT_TAMU_MODEL),
-                        base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
-                        mock=bool(tamu_mock),
-                    )
-                    if not test_resp:
-                        st.error("No response from TAMU API. Check network and base URL.")
-                    elif isinstance(test_resp, str) and test_resp.startswith("__error__"):
-                        st.error("TAMU API call failed. See raw details below.")
-                        with st.expander("TAMU raw error"):
-                            st.code(test_resp)
-                    else:
-                        st.success("TAMU API reachable (response shown below).")
-                        with st.expander("TAMU test response"):
-                            st.code(test_resp)
-                except Exception as e:
-                    st.error(f"TAMU test failed: {e}")
-else:
-    # clear any prior tamu session keys when no api key present
-    st.session_state.pop('tamu_api_key', None)
-    st.session_state.pop('tamu_base_url', None)
-    st.session_state.pop('tamu_mock', None)
-    st.session_state.pop('tamu_model', None)
+elif ai_provider == "OpenAI (ChatGPT)":
+    api_key_input = st.sidebar.text_input("OpenAI API Key", type="password", help="Get your key from https://platform.openai.com/api-keys")
+    st.session_state['openai_api_key'] = api_key_input
+    st.session_state['tamu_api_key'] = None
+    st.session_state['gemini_api_key'] = None
+    
+    if api_key_input:
+        with st.sidebar.expander("OpenAI options", expanded=False):
+            openai_model = st.selectbox(
+                "OpenAI Model",
+                options=["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
+                key='openai_model'
+            )
+            st.session_state['openai_model'] = openai_model
+
+elif ai_provider == "Google Gemini":
+    api_key_input = st.sidebar.text_input("Gemini API Key", type="password", help="Get your key from https://aistudio.google.com/apikey")
+    st.session_state['gemini_api_key'] = api_key_input
+    st.session_state['tamu_api_key'] = None
+    st.session_state['openai_api_key'] = None
+    
+    if api_key_input:
+        with st.sidebar.expander("Gemini options", expanded=False):
+            gemini_model = st.selectbox(
+                "Gemini Model",
+                options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+                key='gemini_model'
+            )
+            st.session_state['gemini_model'] = gemini_model
+
+# Test API connection if key is provided
+if api_key_input:
+    if st.sidebar.button("Test API Connection"):
+        with st.spinner("Testing API connection..."):
+            test_prompt = "Test connection. Reply with just 'OK'."
+            
+            if selected_provider == "tamu":
+                test_resp = call_tamu_api(
+                    api_key_input,
+                    test_prompt,
+                    model=str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL),
+                    base_url=str(st.session_state.get('tamu_base_url') or "https://chat-api.tamu.ai"),
+                    mock=bool(st.session_state.get('tamu_mock', False))
+                )
+            elif selected_provider == "openai":
+                test_resp = call_openai_api(
+                    api_key_input,
+                    test_prompt,
+                    model=st.session_state.get('openai_model', 'gpt-4')
+                )
+            else:  # gemini
+                test_resp = call_gemini_api(
+                    api_key_input,
+                    test_prompt,
+                    model=st.session_state.get('gemini_model', 'gemini-1.5-flash')
+                )
+            
+            if isinstance(test_resp, str) and test_resp.startswith("__error__"):
+                st.error(f"API test failed: {test_resp}")
+            else:
+                st.success("API connection successful!")
+                with st.expander("Test response"):
+                    st.write(test_resp)
 
 
 # parameter keys (used by auto-tune prompt)
@@ -606,34 +904,61 @@ Return a JSON object exactly between markers JSON_START and JSON_END with the fo
 - Include 'climate_factors': How the local climate (precipitation patterns, temperature seasonality) influences the calibration
 """
 
-        resp = call_tamu_api(
-            tamu_api_key or "",
-            prompt,
-            model=str(st.session_state.get('tamu_model') or DEFAULT_TAMU_MODEL),
-            base_url=str(tamu_base_url or "https://chat-api.tamu.ai"),
-            mock=bool(tamu_mock),
-        )
-        if not resp:
-            st.error("No response from TAMU API. Check your API key and network.")
-        elif isinstance(resp, str) and resp.startswith("__error__"):
-            st.error("TAMU API call failed. See raw details below.")
-            with st.expander("TAMU raw error"):
-                st.code(resp)
+        # Get the selected AI provider and API key
+        provider = st.session_state.get('ai_provider', 'tamu')
+        if provider == 'tamu':
+            api_key = st.session_state.get('tamu_api_key')
+            model = st.session_state.get('tamu_model', DEFAULT_TAMU_MODEL)
+            base_url = st.session_state.get('tamu_base_url', 'https://chat-api.tamu.ai')
+            mock = st.session_state.get('tamu_mock', False)
+        elif provider == 'openai':
+            api_key = st.session_state.get('openai_api_key')
+            model = st.session_state.get('openai_model', 'gpt-4')
+            base_url = ""
+            mock = False
+        elif provider == 'gemini':
+            api_key = st.session_state.get('gemini_api_key')
+            model = st.session_state.get('gemini_model', 'gemini-1.5-flash')
+            base_url = ""
+            mock = False
         else:
-            parsed = parse_ai_json(resp or "")
-            if not parsed or not isinstance(parsed, dict):
-                st.error("TAMU did not return parsable JSON. See raw response.")
-                with st.expander("TAMU raw response"):
+            st.error("No AI provider selected. Please configure an API provider first.")
+            api_key = None
+
+        if not api_key:
+            st.error(f"No API key found for {provider.upper()}. Enter your API key in the 'AI API Settings' section.")
+        else:
+            resp = call_ai_api(
+                prompt,
+                api_provider=provider,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                mock=mock
+            )
+            if not resp:
+                st.error(f"No response from {provider.upper()} API. Check your API key and network.")
+            elif isinstance(resp, str) and resp.startswith("__error__"):
+                st.error(f"{provider.upper()} API call failed. See raw details below.")
+                with st.expander(f"{provider.upper()} raw error"):
                     st.code(resp)
             else:
-                # Persist suggestions so they survive reruns (Apply is a separate click)
-                st.session_state['tamu_suggestions'] = parsed
+                parsed = parse_ai_json(resp or "")
+                if not parsed or not isinstance(parsed, dict):
+                    st.error(f"{provider.upper()} did not return parsable JSON. See raw response.")
+                    with st.expander(f"{provider.upper()} raw response"):
+                        st.code(resp)
+                else:
+                    # Persist suggestions so they survive reruns (Apply is a separate click)
+                    st.session_state['ai_suggestions'] = parsed
+                    st.sidebar.success(f"Received suggested parameters from {provider.upper()}")
 
     # If we have persisted suggestions, show them (this makes Apply available across reruns)
-    if st.session_state.get('tamu_suggestions'):
-        st.sidebar.success("Received suggested parameters from TAMU")
-        with st.sidebar.expander("Suggested parameters (TAMU)", expanded=True):
-            suggestions = st.session_state.get('tamu_suggestions', {})
+    if st.session_state.get('ai_suggestions'):
+        provider = st.session_state.get('ai_provider', 'tamu').upper()
+        with st.sidebar.expander(f"Suggested parameters ({provider})", expanded=True):
+            suggestions = st.session_state.get('ai_suggestions', {})
+
             
             # Display reasoning if available
             if suggestions.get('soil_type'):
@@ -651,7 +976,7 @@ Return a JSON object exactly between markers JSON_START and JSON_END with the fo
             param_display = {k: v for k, v in suggestions.items() if k in param_keys}
             st.json(param_display)
             
-            if st.button("Apply suggested parameters", key="apply_tamu_params"):
+            if st.button("Apply suggested parameters", key="apply_ai_suggestions"):
                 # Save current params for undo
                 hist = st.session_state.setdefault('param_history', [])
                 hist.append({k: st.session_state.get(k) for k in param_keys})
@@ -665,31 +990,114 @@ Return a JSON object exactly between markers JSON_START and JSON_END with the fo
                             # if conversion fails, still set the raw value
                             st.session_state[k] = v
                 st.success("Applied suggested parameters")
-            if st.button("Undo last parameter apply", key="undo_tamu_params"):
+                st.rerun()
+            if st.button("Undo last parameter apply", key="undo_ai_suggestions"):
                 hist = st.session_state.get('param_history', [])
                 if hist:
                     last_params = hist.pop()
                     for k, v in last_params.items():
                         st.session_state[k] = v
                     st.success("Reverted to previous parameters")
+                    st.rerun()
                 else:
                     st.info("No previous parameter snapshot available to undo.")
 
+    # SoilGrids parameter estimation based on coordinates
+    st.markdown("---")
+    st.sidebar.subheader("Get Soil Parameters from SoilGrids")
+    st.sidebar.markdown("*Fetch soil data based on your location coordinates*")
+    
+    if st.sidebar.button("Fetch soil parameters from SoilGrids", key="fetch_soilgrids"):
+        loc_lat = st.session_state.get('loc_lat')
+        loc_lon = st.session_state.get('loc_lon')
+        loc_name = st.session_state.get('location_name', 'Unknown Location')
+        
+        if loc_lat is None or loc_lon is None:
+            st.sidebar.error("Please select a location first (use place lookup or coordinates).")
+        else:
+            with st.sidebar.spinner("Fetching soil data from SoilGrids..."):
+                soilgrids_data = fetch_soilgrids_data(loc_lat, loc_lon)
+                if soilgrids_data is None:
+                    st.sidebar.error("Failed to fetch soil data from SoilGrids. Check your coordinates.")
+                else:
+                    params = infer_parameters_from_soilgrids(soilgrids_data)
+                    if params is None:
+                        st.sidebar.error("Could not parse SoilGrids data.")
+                    else:
+                        st.sidebar.success("Successfully fetched soil parameters from SoilGrids!")
+                        st.session_state['soilgrids_params'] = params
+
+    # Display SoilGrids results if available
+    if st.session_state.get('soilgrids_params'):
+        st.sidebar.success("Soil parameters from SoilGrids")
+        with st.sidebar.expander("SoilGrids Results", expanded=True):
+            params = st.session_state.get('soilgrids_params', {})
+            
+            # Display soil classification and properties
+            if params.get('soil_type'):
+                st.markdown(f"**Soil Type:** {params['soil_type']}")
+            if params.get('clay_fraction') is not None:
+                clay_pct = round(params['clay_fraction'] * 100, 1)
+                sand_pct = round(params['sand_fraction'] * 100, 1)
+                silt_pct = round(params['silt_fraction'] * 100, 1)
+                st.markdown(f"**Texture:** Clay {clay_pct}% · Sand {sand_pct}% · Silt {silt_pct}%")
+            if params.get('organic_carbon') is not None:
+                org_pct = round(params['organic_carbon'] * 100, 2)
+                st.markdown(f"**Organic Carbon:** {org_pct}%")
+            
+            st.markdown("---")
+            st.markdown("**Estimated Parameters:**")
+            # Display parameter values
+            param_display = {k: v for k, v in params.items() if k in param_keys}
+            st.json(param_display)
+            
+            if st.sidebar.button("Apply SoilGrids parameters", key="apply_soilgrids_params"):
+                # Save current params for undo
+                hist = st.session_state.setdefault('param_history', [])
+                hist.append({k: st.session_state.get(k) for k in param_keys})
+                # Apply SoilGrids parameters
+                for k, v in params.items():
+                    if k in param_keys:
+                        try:
+                            st.session_state[k] = clamp_param_value(k, v)
+                        except Exception:
+                            st.session_state[k] = v
+                st.sidebar.success("Applied SoilGrids parameters")
+                st.rerun()
+
 # --- SIDEBAR: PARAMETERS ---
+
+# Initialize session state defaults for all parameters if not already set
+param_defaults = {
+    'sh': 0.08,
+    'sw': 0.11,
+    'sstar': 0.33,
+    'sfc': 0.40,
+    'n': 0.55,
+    'zr': 500.0,
+    'ks': 200.0,
+    'ew': 0.1,
+    'emax': 5.0,
+    'beta': 3.0,
+    's0': 0.3,
+}
+for key, default_val in param_defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = default_val
 
 # Use session_state-backed widgets for parameters so they can be updated programmatically
 st.sidebar.subheader("Model Parameters")
-st.sidebar.number_input("Hygroscopic Point (sh)", 0.0, 1.0, value=st.session_state.get('sh', 0.08), format="%.2f", key='sh')
-st.sidebar.number_input("Wilting Point (sw)", 0.0, 1.0, value=st.session_state.get('sw', 0.11), format="%.2f", key='sw')
-st.sidebar.number_input("Stomatal Closure (s*)", 0.0, 1.0, value=st.session_state.get('sstar', 0.33), format="%.2f", key='sstar')
-st.sidebar.number_input("Field Capacity (sfc)", 0.0, 1.0, value=st.session_state.get('sfc', 0.40), format="%.2f", key='sfc')
-st.sidebar.number_input("Porosity (n)", 0.1, 1.0, value=st.session_state.get('n', 0.55), format="%.2f", key='n')
-st.sidebar.number_input("Root Depth (Zr) [mm]", 10.0, 2000.0, value=st.session_state.get('zr', 500.0), key='zr')
-st.sidebar.number_input("Saturated Conductivity (Ks) [mm/day]", 0.0, 1000.0, value=st.session_state.get('ks', 200.0), key='ks')
-st.sidebar.number_input("Evap at Wilting (Ew) [mm/day]", 0.0, 10.0, value=st.session_state.get('ew', 0.1), key='ew')
-st.sidebar.number_input("Max Evap (Emax) [mm/day]", 0.0, 20.0, value=st.session_state.get('emax', 5.0), key='emax')
-st.sidebar.number_input("Leakage Parameter (Beta)", 0.0, 20.0, value=st.session_state.get('beta', 3.0), key='beta')
-st.sidebar.slider("Initial Soil Moisture (s0)", 0.0, 1.0, value=st.session_state.get('s0', 0.3), key='s0')
+st.sidebar.number_input("Hygroscopic Point (sh)", 0.0, 1.0, format="%.2f", key='sh')
+st.sidebar.number_input("Wilting Point (sw)", 0.0, 1.0, format="%.2f", key='sw')
+st.sidebar.number_input("Stomatal Closure (s*)", 0.0, 1.0, format="%.2f", key='sstar')
+st.sidebar.number_input("Field Capacity (sfc)", 0.0, 1.0, format="%.2f", key='sfc')
+st.sidebar.number_input("Porosity (n)", 0.1, 1.0, format="%.2f", key='n')
+st.sidebar.number_input("Root Depth (Zr) [mm]", 10.0, 2000.0, key='zr')
+st.sidebar.number_input("Saturated Conductivity (Ks) [mm/day]", 0.0, 1000.0, key='ks')
+st.sidebar.number_input("Evap at Wilting (Ew) [mm/day]", 0.0, 10.0, key='ew')
+st.sidebar.number_input("Max Evap (Emax) [mm/day]", 0.0, 20.0, key='emax')
+st.sidebar.number_input("Leakage Parameter (Beta)", 0.0, 20.0, key='beta')
+st.sidebar.slider("Initial Soil Moisture (s0)", 0.0, 1.0, key='s0')
 
 # Build parameter dict from session_state
 p = {k: st.session_state.get(k) for k in param_keys}

@@ -778,6 +778,14 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
 
         # 3. Display Quick Summary and Recommendation First (at top)
         if parsed_json and isinstance(parsed_json, dict):
+            soil_reasoning = parsed_json.get('soil_conditions_reasoning')
+            if soil_reasoning:
+                st.markdown(f"**Soil Conditions Analysis:** {soil_reasoning}")
+
+            location_factors = parsed_json.get('location_specific_factors')
+            if location_factors:
+                st.markdown(f"**Location-Specific Factors:** {location_factors}")
+
             simple_summary = parsed_json.get('simple_summary')
             if simple_summary:
                 st.info(f"**Simple Summary:** {simple_summary}", icon="👋")
@@ -786,15 +794,7 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
             if recommendation:
                 st.success(f"**Insight:** {recommendation}", icon="💡")
             
-            st.markdown("---")
 
-            soil_reasoning = parsed_json.get('soil_conditions_reasoning')
-            if soil_reasoning:
-                st.markdown(f"**Soil Conditions Analysis:** {soil_reasoning}")
-
-            location_factors = parsed_json.get('location_specific_factors')
-            if location_factors:
-                st.markdown(f"**Location-Specific Factors:** {location_factors}")
     else:
         # Only show this if there's no error message either
         if 'ai_summary_error' not in st.session_state:
@@ -806,7 +806,7 @@ def show_ai_summary_block(results, button_key: str = "generate_ai_summary_persis
         button_text = "Regenerate AI Summary" if 'ai_summary' in st.session_state else "Generate AI Summary"
 
         if st.button(button_text, key=button_key):
-            with st.spinner("Contacting TAMU AI for a summary..."):
+            with st.spinner("Contacting AI for a summary..."):
                 generate_and_store_summary(results)
                 st.rerun()
 

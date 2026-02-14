@@ -15,6 +15,11 @@ DEFAULT_TAMU_MODEL = "protected.claude-haiku-5.4"
 # Initialize default model in session_state if not already set so the UI shows the intended default
 if 'tamu_model' not in st.session_state:
     st.session_state['tamu_model'] = DEFAULT_TAMU_MODEL
+# Initialize other model keys before any widgets are created to avoid Streamlit widget/state errors
+if 'openai_model' not in st.session_state:
+    st.session_state['openai_model'] = 'gpt-4'
+if 'gemini_model' not in st.session_state:
+    st.session_state['gemini_model'] = 'gemini-1.5-flash'
 
 # --- AI helpers ---
 def parse_ai_json(text: str):
@@ -171,6 +176,41 @@ def call_openai_api(api_key: str, prompt: str, model: str = "gpt-4", timeout: in
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        # If model not found (404) or bad request referencing model, try to list models and retry
+        if r.status_code == 404 or (r.status_code == 400 and 'model' in (r.text or '').lower()):
+            available = call_openai_list_models(api_key)
+            if available:
+                # pick a preferred candidate if present
+                candidates_pref = ['gpt-4', 'gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4o-mini-instruct']
+                candidate = None
+                for pref in candidates_pref:
+                    if pref in available:
+                        candidate = pref
+                        break
+                if candidate is None:
+                    candidate = available[0]
+                # attempt retry with candidate
+                try:
+                    payload['model'] = candidate
+                    r2 = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                    if r2.status_code == 200:
+                        data = r2.json()
+                        choices = data.get("choices") or []
+                        if choices:
+                            message = choices[0].get("message", {})
+                            content = message.get("content")
+                            if content:
+                                return content
+                        return "__error__:NoContent:No content in response"
+                    else:
+                        return f"__error__:HTTP_{r2.status_code}:retry_with_model={candidate}:{r2.text}"
+                except requests.exceptions.RequestException as e:
+                    return f"__error__:{e.__class__.__name__}:{str(e)}"
+            try:
+                avail_json = json.dumps({'available_models': available})
+            except Exception:
+                avail_json = str(available)
+            return f"__error__:HTTP_{r.status_code}:original_response={r.text}; available_models={avail_json}"
         if r.status_code != 200:
             return f"__error__:HTTP_{r.status_code}:{r.text}"
         data = r.json()
@@ -185,6 +225,30 @@ def call_openai_api(api_key: str, prompt: str, model: str = "gpt-4", timeout: in
         return f"__error__:{e.__class__.__name__}:{str(e)}"
     except Exception as e:
         return f"__error__:UnexpectedError:{str(e)}"
+
+
+def call_openai_list_models(api_key: str):
+    """Return a list of available OpenAI model ids. Returns empty list on failure."""
+    try:
+        url = "https://api.openai.com/v1/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return []
+        j = r.json()
+        models = []
+        # response typically has 'data' list
+        data = j.get('data') if isinstance(j, dict) else j
+        if not data:
+            return []
+        for item in data:
+            if isinstance(item, dict):
+                mid = item.get('id') or item.get('model') or item.get('name')
+                if mid:
+                    models.append(mid)
+        return models
+    except Exception:
+        return []
 
 
 def call_gemini_api(api_key: str, prompt: str, model: str = "gemini-1.5-flash", timeout: int = 30):
@@ -202,6 +266,51 @@ def call_gemini_api(api_key: str, prompt: str, model: str = "gemini-1.5-flash", 
     try:
         # API key is passed as query parameter for Gemini
         r = requests.post(f"{url}?key={api_key}", headers=headers, json=payload, timeout=timeout)
+        if r.status_code == 404:
+            # Try to list available models and retry with a supported one
+            available = call_gemini_list_models(api_key)
+            if available:
+                # prefer models that contain 'gemini' or 'bison' or chat/text identifiers
+                candidate = None
+                for m in available:
+                    name = str(m).lower()
+                    if 'gemini' in name or 'bison' in name or 'chat' in name or 'text' in name:
+                        candidate = m
+                        break
+                if candidate is None:
+                    candidate = available[0]
+                # Normalize model id for URL path (avoid duplicating 'models/' prefix)
+                if isinstance(candidate, str) and '/' in candidate:
+                    model_id = candidate.split('/', 1)[1]
+                else:
+                    model_id = str(candidate)
+                # attempt one retry with discovered model id
+                try:
+                    retry_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+                    r2 = requests.post(f"{retry_url}?key={api_key}", headers=headers, json=payload, timeout=timeout)
+                    if r2.status_code == 200:
+                        data = r2.json()
+                        candidates = data.get("candidates") or []
+                        if candidates:
+                            content = candidates[0].get("content", {})
+                            parts = content.get("parts") or []
+                            if parts:
+                                text = parts[0].get("text")
+                                if text:
+                                    # store a hint of the working model for diagnostics
+                                    return text
+                        return "__error__:NoContent:No content in response"
+                    else:
+                        # include the attempted model and response text for easier debugging
+                        return f"__error__:HTTP_{r2.status_code}:retry_with_model={model_id}:{r2.text}"
+                except requests.exceptions.RequestException as e:
+                    return f"__error__:{e.__class__.__name__}:{str(e)}"
+            # no available models or retry failed — return original 404 with available model list if present
+            try:
+                avail_json = json.dumps({'available_models': available})
+            except Exception:
+                avail_json = str(available)
+            return f"__error__:HTTP_404:original_response={r.text}; available_models={avail_json}"
         if r.status_code != 200:
             return f"__error__:HTTP_{r.status_code}:{r.text}"
         data = r.json()
@@ -218,6 +327,54 @@ def call_gemini_api(api_key: str, prompt: str, model: str = "gemini-1.5-flash", 
         return f"__error__:{e.__class__.__name__}:{str(e)}"
     except Exception as e:
         return f"__error__:UnexpectedError:{str(e)}"
+
+
+def call_gemini_list_models(api_key: str):
+    """Return a list of available Gemini/GenAI model ids (tries v1beta and v1 endpoints).
+    Returns list of model names or an empty list on failure.
+    """
+    try:
+        urls = [
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            f"https://generativelanguage.googleapis.com/v1/models?key={api_key}",
+        ]
+        for u in urls:
+            try:
+                r = requests.get(u, timeout=10)
+            except requests.exceptions.RequestException:
+                continue
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            # Expected structure may be {'models': [{ 'name': 'models/..', ...}, ...]} or list
+            models = []
+            if isinstance(j, dict):
+                if 'models' in j and isinstance(j['models'], list):
+                    for item in j['models']:
+                        # prefer the resource name field
+                        name = item.get('name') or item.get('model') or item.get('id')
+                        if name:
+                            models.append(name)
+                else:
+                    # try to extract keys or simple list
+                    for v in j.values():
+                        if isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict):
+                                    name = item.get('name') or item.get('model') or item.get('id')
+                                    if name:
+                                        models.append(name)
+            elif isinstance(j, list):
+                for item in j:
+                    if isinstance(item, dict):
+                        name = item.get('name') or item.get('model') or item.get('id')
+                        if name:
+                            models.append(name)
+            if models:
+                return models
+    except Exception:
+        return []
+    return []
 
 
 def call_ai_api(prompt: str, api_provider: str = "tamu", api_key: str = "", model: str = "", base_url: str = "https://chat-api.tamu.ai", mock: bool = False, timeout: int = 30):
@@ -383,16 +540,28 @@ def fetch_soilgrids_data(lat: float, lon: float):
     """
     try:
         url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
-        params = {
-            "lon": float(lon),
-            "lat": float(lat),
-            "property": ["clay", "sand", "silt", "organic_carbon"],
-            "depth": ["0-5cm", "5-15cm", "15-30cm", "30-60cm"],
-        }
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code != 200:
+        # Query each property separately (the API can return 500 when multiple different 'property' values are passed at once).
+        properties = ["clay", "sand", "silt", "ocd", "soc", "usda_texture"]
+        depths = ["0-5cm", "5-15cm", "15-30cm", "30-60cm"]
+        headers = {"Accept": "application/json"}
+
+        combined_layers = []
+        for prop in properties:
+            params = {"lat": float(lat), "lon": float(lon), "property": prop, "depth": depths}
+            r = requests.get(url, params=params, headers=headers, timeout=20)
+            if r.status_code != 200:
+                # skip this property but continue
+                continue
+            j = r.json()
+            # expected structure: {'properties': {'layers': [ {...} ]}, ...}
+            prop_layers = j.get('properties', {}).get('layers') or []
+            if prop_layers:
+                # append the first (and typically only) layer for this property
+                combined_layers.append(prop_layers[0])
+
+        if not combined_layers:
             return None
-        return r.json()
+        return {"properties": {"layers": combined_layers}}
     except Exception:
         return None
 
@@ -402,50 +571,84 @@ def infer_parameters_from_soilgrids(soilgrids_data: dict):
     Uses soil texture (clay/sand/silt percentages) to estimate parameters.
     Returns a dict with estimated parameters and soil_type description.
     """
-    if not soilgrids_data or 'properties' not in soilgrids_data:
+    if not soilgrids_data:
         return None
-    
+
+    def _find_mean(data, prop_name):
+        """Recursively search SoilGrids JSON for the first 'mean' value for a given property."""
+        if data is None:
+            return None
+        if isinstance(data, dict):
+            # direct property present
+            if prop_name in data and isinstance(data[prop_name], dict) and 'mean' in data[prop_name]:
+                return data[prop_name]['mean']
+            # some responses nest values under 'values' or similar
+            if 'values' in data and isinstance(data['values'], dict) and prop_name in data['values']:
+                v = data['values'][prop_name]
+                if isinstance(v, dict) and 'mean' in v:
+                    return v['mean']
+            for k, v in data.items():
+                res = _find_mean(v, prop_name)
+                if res is not None:
+                    return res
+        elif isinstance(data, list):
+            for item in data:
+                res = _find_mean(item, prop_name)
+                if res is not None:
+                    return res
+        return None
+
     try:
-        props = soilgrids_data.get('properties', {})
-        layers = props.get('layers', [])
-        if not layers:
-            return None
-        
-        # Use 0-5cm layer for topsoil properties
-        layer = layers[0]
-        depths = layer.get('depths', [])
-        if not depths:
-            return None
-        
-        depth_0_5 = depths[0]
-        
-        # Extract soil texture percentages (0-5cm layer, mean values)
-        clay_mean = depth_0_5.get('clay', {}).get('mean', 20.0) / 1000.0  # Convert from g/kg to fraction
-        sand_mean = depth_0_5.get('sand', {}).get('mean', 50.0) / 1000.0
-        silt_mean = depth_0_5.get('silt', {}).get('mean', 30.0) / 1000.0
-        org_carbon = depth_0_5.get('organic_carbon', {}).get('mean', 15.0) / 1000.0  # Convert from dg/kg to fraction
-        
-        # Normalize to fractions (0-1)
-        total = clay_mean + sand_mean + silt_mean
+        # SoilGrids typically returns concentrations in g/kg or similar; convert to fraction when >1
+        def _to_fraction(raw):
+            if raw is None:
+                return None
+            try:
+                rv = float(raw)
+            except Exception:
+                return None
+            if rv > 1.0:
+                return rv / 1000.0
+            return rv
+
+        # Prefer 'ocd' then 'soc' for organic carbon; fall back to 0.015 (~1.5%) if missing
+        clay_raw = _find_mean(soilgrids_data, 'clay')
+        sand_raw = _find_mean(soilgrids_data, 'sand')
+        silt_raw = _find_mean(soilgrids_data, 'silt')
+        oc_raw = _find_mean(soilgrids_data, 'ocd') or _find_mean(soilgrids_data, 'soc') or _find_mean(soilgrids_data, 'organic_carbon')
+
+        clay_val = _to_fraction(clay_raw)
+        if clay_val is None:
+            clay_val = 0.20
+        sand_val = _to_fraction(sand_raw)
+        if sand_val is None:
+            sand_val = 0.50
+        silt_val = _to_fraction(silt_raw)
+        if silt_val is None:
+            silt_val = 0.30
+        org_carbon = _to_fraction(oc_raw)
+        if org_carbon is None:
+            org_carbon = 0.015
+
+        # normalize if values are present but don't sum to 1
+        total = 0.0
+        for v in (clay_val, sand_val, silt_val):
+            if v is not None:
+                total += v
         if total > 0:
-            clay = clay_mean / total
-            sand = sand_mean / total
-            silt = silt_mean / total
+            clay = clay_val / total
+            sand = sand_val / total
+            silt = silt_val / total
         else:
             clay, sand, silt = 0.2, 0.5, 0.3
-        
-        # Classify soil texture (USDA soil texture triangle)
+
         soil_type = classify_soil_texture(clay, sand, silt)
-        
-        # Estimate water balance parameters based on soil texture
-        # Using typical values from soil physics literature
         params = estimate_water_balance_parameters(clay, sand, silt, org_carbon)
         params['soil_type'] = soil_type
         params['clay_fraction'] = clay
         params['sand_fraction'] = sand
         params['silt_fraction'] = silt
         params['organic_carbon'] = org_carbon
-        
         return params
     except Exception:
         return None
@@ -802,7 +1005,6 @@ elif ai_provider == "OpenAI (ChatGPT)":
                 options=["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
                 key='openai_model'
             )
-            st.session_state['openai_model'] = openai_model
 
 elif ai_provider == "Google Gemini":
     api_key_input = st.sidebar.text_input("Gemini API Key", type="password", help="Get your key from https://aistudio.google.com/apikey")
@@ -817,7 +1019,6 @@ elif ai_provider == "Google Gemini":
                 options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
                 key='gemini_model'
             )
-            st.session_state['gemini_model'] = gemini_model
 
 # Test API connection if key is provided
 if api_key_input:

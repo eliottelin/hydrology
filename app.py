@@ -1204,7 +1204,6 @@ Return a JSON object exactly between markers JSON_START and JSON_END with the fo
                     st.info("No previous parameter snapshot available to undo.")
 
     # SoilGrids parameter estimation based on coordinates
-    st.markdown("---")
     st.sidebar.subheader("Get Soil Parameters from SoilGrids")
     st.sidebar.markdown("*Fetch soil data based on your location coordinates*")
     

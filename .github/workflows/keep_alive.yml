@@ -1,0 +1,15 @@
+name: Keep App Alive
+
+on:
+  # 1. Run automatically every 3 hours (approx)
+  schedule:
+    - cron: "0 */3 * * *"
+  # 2. Allow you to run it manually from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  ping_app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake up Streamlit App
+        run: curl https://hydrology.streamlit.app/

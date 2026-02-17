@@ -1,3 +1,46 @@
+# Hydrology — Water Balance Simulation
+
+A compact Streamlit app for running a LAIÖ-style water-balance simulation with optional AI-assisted parameter tuning.
+
+Quick overview
+- Purpose: simulate catchment water balance, inspect metrics and time-series, and optionally let an AI suggest model parameters.
+- UI: sidebar for inputs (location, data source, parameters, API keys), main area for plots, metrics and CSV export.
+
+Requirements
+- Python 3.8+ and dependencies listed in `requirements.txt`.
+- Install quickly:
+```bash
+
+Run
+```bash
+streamlit run app.py
+
+Typical workflow
+- Enter a location or upload weather CSV in the sidebar.
+- Select data source, adjust model parameters (or use Auto‑Tune), then click "Run Simulation".
+- View metrics, charts, a raw results table, and download a CSV of results.
+
+AI integration (optional)
+- Supports TAMU AI (default), OpenAI, and Gemini via API keys provided in the sidebar or via Streamlit secrets.
+- Use Mock TAMU AI for local development. Auto‑Tune suggestions can be previewed, applied, and undone.
+
+Files
+- `app.py` — main Streamlit application and UI logic
+- `model.py` — water-balance simulation functions
+- `tamu_list_models.py` — helper to list TAMU models (requires TAMU key)
+- `requirements.txt` — Python dependencies
+
+Security & deployment notes
+- Never commit API keys. Use `.streamlit/secrets.toml` or environment variables for deployment.
+- For Streamlit sharing or cloud deploys, place keys in the platform's secrets manager or `.streamlit/secrets.toml`.
+
+Troubleshooting
+- If AI calls fail, verify API key/network and use Mock TAMU AI to verify UI flows.
+- To run the TAMU model listing helper: `python tamu_list_models.py` (provide your key as required).
+
+Questions or next steps
+- Want me to run the app locally, add a short example CSV, or commit this change? 
+
 # Hydrology Lab — Water Balance Simulation
 
 Small Streamlit app to run a Laio et al. water-balance simulation with optional AI-assisted parameter tuning (TAMU AI).

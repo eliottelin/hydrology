@@ -9,7 +9,6 @@ Quick overview
 Requirements
 - Python 3.8+ and dependencies listed in `requirements.txt`.
 - Install quickly:
-```bash
 
 Run
 ```bash

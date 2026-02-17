@@ -13,6 +13,7 @@ Requirements
 Run
 ```bash
 streamlit run app.py
+```
 
 Typical workflow
 - Enter a location or upload weather CSV in the sidebar.

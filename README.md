@@ -1,18 +1,23 @@
 # Hydrology — Water Balance Simulation
 
-A compact Streamlit app for running a LAIÖ-style water-balance simulation with optional AI-assisted parameter tuning.
+A compact Streamlit app for running a LAIÖ-style water-balance simulation with optional AI-assisted parameter tuning and results analysis.
 
 Quick overview
 - Purpose: simulate catchment water balance, inspect metrics and time-series, and optionally let an AI suggest model parameters.
 - UI: sidebar for inputs (location, data source, parameters, API keys), main area for plots, metrics and CSV export.
 
-Requirements
-- Python 3.8+ and dependencies listed in `requirements.txt`.
-- Install quickly:
+Quickstart
+- Requirements: Python 3.8+ and dependencies in `requirements.txt`.
+- Install and run (recommended):
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+streamlit run app.py
+```
+- Quick fallback if `requirements.txt` is missing:
+```bash
+pip install streamlit pandas numpy plotly requests
 ```
 
 Run
@@ -20,102 +25,35 @@ Run
 streamlit run app.py
 ```
 
-Typical workflow
-- Enter a location or upload weather CSV in the sidebar.
-- Select data source, adjust model parameters (or use Auto‑Tune), then click "Run Simulation".
-- View metrics, charts, a raw results table, and download a CSV of results.
+Features
+- Fetch weather: geocode by place name (Open‑Meteo) or fetch by coordinates (Open‑Meteo archive).
+- Data sources: fetched weather, uploaded CSV, or generated example dataset.
+- Sidebar preview: small time-series preview shown after a successful fetch.
+- Parameter control: edit model parameters in the sidebar; supports Apply / Undo and maintains a parameter history.
+- AI Auto‑Tune: request parameter suggestions from TAMU (default), OpenAI, or Gemini. Suggestions can be previewed, applied, or undone. Mock mode supported for local testing.
+- Run simulation: computes water‑balance time series and summary metrics, displays interactive Plotly charts, and exposes raw results for CSV download.
+- Persistence: last results and AI summary persist in Streamlit session state during a session.
 
-AI integration (optional)
-- Supports TAMU AI (default), OpenAI, and Gemini via API keys provided in the sidebar or via Streamlit secrets.
-- Use Mock TAMU AI for local development. Auto‑Tune suggestions can be previewed, applied, and undone.
+Usage (high level)
+- Sidebar: enter location or coordinates, choose data source, upload CSV if needed, and set model parameters or enable Auto‑Tune.
+- AI: enter provider API key (sidebar) or store in `.streamlit/secrets.toml`. Use "Test TAMU API" to validate connectivity when using TAMU.
+- Run: click "Run Simulation" to produce metrics, interactive charts, the results table, and a CSV download link.
 
-Files
-- `app.py` — main Streamlit application and UI logic
-- `model.py` — water-balance simulation functions
-- `tamu_list_models.py` — helper to list TAMU models (requires TAMU key)
-- `requirements.txt` — Python dependencies
+AI integration notes
+- Supported providers: TAMU (default), OpenAI, Gemini. Provide per-provider API keys in the sidebar or via Streamlit secrets.
+- TAMU specifics: base URL can be overridden, model list helper exists (`tamu_list_models.py`), and mock mode exercises UI flows without real calls.
 
-Security & deployment notes
-- Never commit API keys. Use `.streamlit/secrets.toml` or environment variables for deployment.
-- For Streamlit sharing or cloud deploys, place keys in the platform's secrets manager or `.streamlit/secrets.toml`.
+Developer notes
+- Main files:
+  - `app.py` — Streamlit UI, AI helpers, and session-state management
+  - `model.py` — water-balance simulation routines
+  - `tamu_list_models.py` — convenience script to list TAMU models (requires TAMU key)
+- Important session-state keys: `rain_df`, parameters (`sh, sw, sstar, sfc, n, zr, ks, ew, emax, beta, s0`), `tamu_suggestions`, `param_history`, `last_results`, `ai_summary`.
 
 Troubleshooting
-- If AI calls fail, verify API key/network and use Mock TAMU AI to verify UI flows.
-- To run the TAMU model listing helper: `python tamu_list_models.py` (provide your key as required).
+- AI errors: check API key, network/DNS, and use Mock TAMU AI to validate UI behavior.
+- TAMU DNS issues: test resolution with `dig` or `python -c "import socket; print(socket.gethostbyname('api.tamu.ai'))"`.
+- Logs: AI call traces may be written to `ai_logs.txt` if enabled by the app.
 
-Questions or next steps
-- Want me to run the app locally, add a short example CSV, or commit this change? 
-
-# Hydrology Lab — Water Balance Simulation
-
-Small Streamlit app to run a Laio et al. water-balance simulation with optional AI-assisted parameter tuning (TAMU AI).
-
-## Features
-- Fetch precipitation by place name (Open-Meteo geocoding) or coordinates (Open-Meteo archive).
-- Mini preview plot in the sidebar after a successful fetch.
-- Data source selection: Use fetched weather / Upload CSV / Generated example.
-- Model parameters editable in sidebar; AI Auto‑Tune (TAMU) can suggest and apply parameters (Apply / Undo).
-- Run simulation -> metrics, charts, raw table, and CSV download.
-- Optional TAMU AI integration:
-  - Per-user API key (entered in sidebar).
-  - Model dropdown (fetched from TAMU when key present) or manual model id input.
-  - Mock mode for local dev.
-  - Test TAMU API button (DNS preflight + request).
-- Persistent last results and AI summary stored in session state.
-- Local safe-mode summarizer used if TAMU not configured / mocked.
-
-## Quick start (dev)
-1. Create virtualenv and install deps:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-   If there is no `requirements.txt`, install:
-   ```bash
-   pip install streamlit pandas numpy plotly requests
-   ```
-
-2. Run the app:
-   ```bash
-   streamlit run app.py
-   ```
-
-3. Sidebar workflow:
-   - Location -> look up place or expand "Fetch weather by coordinates".
-   - After fetch, mini preview will appear in sidebar.
-   - Choose Data Source on main page.
-   - Adjust model parameters (or use Auto‑Tune).
-   - Click "Run Simulation".
-   - View metrics (top), summary (if generated), and charts below.
-
-4. TAMU AI (optional):
-   - Enter your TAMU API key in the sidebar (recommended to put secrets in `.streamlit/secrets.toml` for deployments).
-   - Set TAMU API base URL if different (default `https://chat-api.tamu.ai`).
-   - Toggle Mock TAMU AI for development.
-   - Click "Test TAMU API" to validate connectivity.
-   - Click "Auto-Tune parameters (TAMU)" to request suggestions.
-     - Suggestions are shown in an expander.
-     - Click "Apply suggested parameters" to immediately apply.
-     - Click "Undo last parameter apply" to revert.
-
-5. Troubleshooting
-   - DNS / Name resolution errors for TAMU:
-     - Check DNS: `dig api.tamu.ai +short` or `python -c "import socket; print(socket.gethostbyname('api.tamu.ai'))"`.
-     - Check network / proxy settings.
-   - If TAMU fails, enable `Mock TAMU AI (dev)` to test UI flows.
-   - Logs (AI request traces) are appended to `ai_logs.txt` in project root (if enabled).
-
-6. Developer notes
-   - `tamu_list_models.py` can list available TAMU models (run locally with your API key).
-   - Session state keys used: `rain_df`, parameter keys (`sh,sw,sstar,sfc,n,zr,ks,ew,emax,beta,s0`), `tamu_suggestions`, `param_history`, `last_results`, `ai_summary`.
-   - UI widgets are session-state backed so parameter Apply/Undo persists across reruns.
-
-## File overview
-- `app.py` — main Streamlit app
-- `model.py` — water-balance simulation logic
-- `tamu_list_models.py` — (utility) list TAMU models (requires TAMU key)
-- `ai_logs.txt` — appended AI call logs (project root)
-
-## Security
-- Do not commit API keys. Use `.streamlit/secrets.toml` or environment variables for deployments.
+Security
+- Do not commit API keys. Use `.streamlit/secrets.toml` or environment variables for deployments and platform secret managers for cloud deploys.

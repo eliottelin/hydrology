@@ -1,10 +1,10 @@
 name: Keep App Alive
 
 on:
-  # 1. Run automatically every 3 hours (approx)
+  # Run every 45 minutes (approx)
+  # */45 means "every 45th minute"
   schedule:
-    - cron: "0 */3 * * *"
-  # 2. Allow you to run it manually from the Actions tab for testing
+    - cron: "*/45 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,4 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wake up Streamlit App
-        run: curl https://hydrology.streamlit.app/
+        # We add a "User Agent" (-A) so Streamlit thinks a real Chrome browser is visiting.
+        # We also add --max-time to prevent it from hanging.
+        run: |
+          curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
+          --max-time 10 \
+          https://hydrology-pilot.streamlit.app/
